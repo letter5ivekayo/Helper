@@ -442,7 +442,7 @@ client.on('interactionCreate', async function (i) {
         ts_iso: ts.toISOString(),
         ts_epoch: ts.valueOf(),
         brand: brand.name,
-        seller_name: i.member && i.member.displayName ? i.member.displayName : i.user.username,
+        seller_name: buyer,
         seller_id: i.user.id,
         buyer_name: buyer,
         tickets: tickets,
