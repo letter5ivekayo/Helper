@@ -270,7 +270,6 @@ const commands = [
 ];
 
 async function registerCommands() {
-async function registerCommands() {
   const appId = process.env.APPLICATION_ID;
   if (!appId) return;
 
