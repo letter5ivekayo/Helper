@@ -124,7 +124,7 @@ class SheetStore {
       console.log('Created weekly tab: ' + title);
     }
 
-    .loadHeaderRow(1);
+    await sheet.loadHeaderRow(1);
     return sheet;
   }
 
