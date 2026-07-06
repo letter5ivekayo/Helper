@@ -425,14 +425,14 @@ client.on('interactionCreate', async function (i) {
         sheet = await store.doc.addSheet({
           title: title,
           headerValues: [
-            'ts_iso',
-            'ts_epoch',
-            'brand',
-            'seller_name',
-            'seller_id',
-            'buyer_name',
-            'tickets',
-          ],
+  'ts_iso',
+  'ts_epoch',
+  'brand',
+  'seller_name',
+  'seller_id',
+  'buyer_name',
+  'tickets',
+],
         });
 
         console.log('Created raffle tab: ' + title);
