@@ -358,14 +358,15 @@ client.on('interactionCreate', async function (i) {
         sheet = await store.doc.addSheet({
           title: title,
           headerValues: [
-            'ts_iso',
-            'ts_epoch',
-            'brand',
-            'seller_name',
-            'seller_id',
-            'buyer_name',
-            'buyer_id',
-            'tickets',
+            [
+    'ts_iso',
+    'ts_epoch',
+    'brand',
+    'seller_name',
+    'seller_id',
+    'buyer_name',
+    'tickets',
+]
           ],
         });
 
