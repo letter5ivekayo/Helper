@@ -342,7 +342,7 @@ client.on('interactionCreate', async function (i) {
 
       const tzName = brand.timezone || 'America/Chicago';
       const window = weekWindow(new Date(), brand.week_start || 'sun', tzName);
-      const title = 'Raffle ' + window.start.format('MM-DD-YYYY');
+     const title = 'Raffle';
 
       const store = storeFor(brand.sheet_id);
       await store.init();
