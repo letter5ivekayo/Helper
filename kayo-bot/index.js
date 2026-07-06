@@ -259,7 +259,6 @@ const commands = [
     ],
   },
   {
-  {
   name: 'raffle',
   description: 'Log raffle tickets',
   options: [
@@ -268,7 +267,7 @@ const commands = [
     { name: 'tickets', description: 'How many tickets', type: 4, required: true, min_value: 1 },
   ],
 },
-];
+
 async function registerCommands() {
   const appId = process.env.APPLICATION_ID;
   if (!appId) return;
