@@ -468,7 +468,6 @@ client.on('interactionCreate', async function (i) {
     } catch (_) {}
   }
 });
-
 client.on('messageCreate', async function (m) {
   try {
     const brand = BRANDS.find(function (b) {
