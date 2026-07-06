@@ -258,6 +258,15 @@ const commands = [
       { name: 'week_start_iso', description: 'ISO date in week optional', type: 3, required: false },
     ],
   },
+  {
+    name: 'raffle',
+    description: 'Log raffle tickets',
+    options: [
+      { name: 'brand', description: 'Brand name', type: 3, required: true },
+      { name: 'buyer', description: 'Who bought the tickets', type: 6, required: true },
+      { name: 'tickets', description: 'How many tickets', type: 4, required: true, min_value: 1 },
+    ],
+  },
 ];
 
 async function registerCommands() {
@@ -316,7 +325,72 @@ client.on('interactionCreate', async function (i) {
     if (i.commandName === 'payout') {
       const brandName = i.options.getString('brand');
       const dateIso = i.options.getString('week_start_iso');
+    if (i.commandName === 'raffle') {
+      const brandName = i.options.getString('brand');
+      const buyer = i.options.getUser('buyer');
+      const tickets = i.options.getInteger('tickets');
 
+      const brand = BRANDS.find(function (b) {
+        return b.name.toLowerCase() === String(brandName || '').toLowerCase();
+      });
+
+      if (!brand) {
+        return i.editReply({
+          content: 'Unknown brand. Available: ' + BRANDS.map(function (b) { return b.name; }).join(', '),
+        });
+      }
+
+      const tzName = brand.timezone || 'America/Chicago';
+      const window = weekWindow(new Date(), brand.week_start || 'sun', tzName);
+      const title = 'Raffle ' + window.start.format('MM-DD-YYYY');
+
+      const store = storeFor(brand.sheet_id);
+      await store.init();
+
+      let sheet = store.doc.sheetsByTitle[title];
+
+      if (!sheet) {
+        sheet = await store.doc.addSheet({
+          title: title,
+          headerValues: [
+            'ts_iso',
+            'ts_epoch',
+            'brand',
+            'seller_name',
+            'seller_id',
+            'buyer_name',
+            'buyer_id',
+            'tickets',
+          ],
+        });
+
+        console.log('Created raffle tab: ' + title);
+      }
+
+      const ts = dayjsBase.tz(new Date(), tzName);
+
+      await sheet.addRow({
+        ts_iso: ts.toISOString(),
+        ts_epoch: ts.valueOf(),
+        brand: brand.name,
+        seller_name: i.member && i.member.displayName ? i.member.displayName : i.user.username,
+        seller_id: i.user.id,
+        buyer_name: buyer.username,
+        buyer_id: buyer.id,
+        tickets: tickets,
+      });
+
+      return i.editReply({
+        content:
+          '✅ Logged ' +
+          tickets +
+          ' raffle ticket(s) for ' +
+          buyer.username +
+          ' under ' +
+          brand.name +
+          '.',
+      });
+    }
       const brand = BRANDS.find(function (b) {
         return b.name.toLowerCase() === String(brandName || '').toLowerCase();
       });
