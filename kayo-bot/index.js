@@ -70,27 +70,78 @@ class SheetStore {
     this.ready = true;
   }
 
-  async append(row) {
+  weeklyTabName(brand, refDate = new Date()) {
+    const tzName = brand.timezone || 'America/Chicago';
+    const startOn = brand.week_start || 'sun';
+    const { start } = weekWindow(refDate, startOn, tzName);
+    return `Week ${start.format('MM-DD-YYYY')}`;
+  }
+
+  async ensureWeeklyTab(brand, refDate = new Date()) {
     await this.init();
 
-    // de-dupe by discord_message_id
+    const title = this.weeklyTabName(brand, refDate);
+
+    let sheet = this.doc.sheetsByTitle[title];
+
+    if (!sheet) {
+      sheet = await this.doc.addSheet({
+        title,
+        headerValues: [
+          'discord_message_id',
+          'brand',
+          'ts_iso',
+          'ts_epoch',
+          'employee_display',
+          'employee_id',
+          'job_name',
+          'amount',
+          'memo',
+          'invoiced_by',
+          'invoice_status',
+        ],
+      });
+
+      console.log(`Created weekly tab: ${title}`);
+    }
+
+    await sheet.loadHeaderRow(1);
+    return sheet;
+  }
+
+  async append(row, brand) {
+    await this.init();
+
+    // de-dupe by discord_message_id in raw
     await this.raw.loadCells('A:A');
+
     const ids = new Set();
     const totalRows = this.raw.rowCount;
+
     for (let r = 1; r < totalRows; r++) {
       const cell = this.raw.getCell(r, 0);
       if (!cell || !cell.value) break;
       ids.add(String(cell.value));
     }
-    if (ids.has(String(row.discord_message_id))) return { deduped: true };
 
+    if (ids.has(String(row.discord_message_id))) {
+      return { deduped: true };
+    }
+
+    // always keep raw as master log
     await this.raw.addRow(row);
+
+    // also write to this week's tab
+    const weeklySheet = await this.ensureWeeklyTab(brand);
+    await weeklySheet.addRow(row);
+
     return { ok: true };
   }
 
   async fetchRange(brand, startEpoch, endEpoch) {
     await this.init();
     await this.raw.loadHeaderRow(1);
+
     const rows = await this.raw.getRows();
 
     const wantBrand = String(brand || '').trim().toLowerCase();
@@ -99,12 +150,13 @@ class SheetStore {
     for (const r of rows) {
       const rowBrand = String(r.get('brand') || '').trim().toLowerCase();
       const tsEpoch = Number(String(r.get('ts_epoch') || '').replace(/[^\d.-]/g, ''));
-      if (!Number.isFinite(tsEpoch)) continue;
 
+      if (!Number.isFinite(tsEpoch)) continue;
       if (rowBrand !== wantBrand) continue;
       if (tsEpoch < startEpoch || tsEpoch >= endEpoch) continue;
 
-      const amt = Number(String(r.get('amount') || '0').replace(/[^0-9.\-]/g, '')) || 0;
+      const amt =
+        Number(String(r.get('amount') || '0').replace(/[^0-9.\-]/g, '')) || 0;
 
       cleaned.push({
         discord_message_id: r.get('discord_message_id'),
@@ -120,14 +172,10 @@ class SheetStore {
         invoice_status: r.get('invoice_status'),
       });
     }
+
     return cleaned;
   }
 }
-
-const stores = new Map();
-function storeFor(sheetId) {
-  if (!stores.has(sheetId)) stores.set(sheetId, new SheetStore(sheetId));
-  return stores.get(sheetId);
 }
 
 // ---------- Helpers ----------
