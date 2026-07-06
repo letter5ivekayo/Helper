@@ -326,72 +326,7 @@ client.on('interactionCreate', async function (i) {
     if (i.commandName === 'payout') {
       const brandName = i.options.getString('brand');
       const dateIso = i.options.getString('week_start_iso');
-    if (i.commandName === 'raffle') {
-      const brandName = i.options.getString('brand');
-      const buyer = i.options.getUser('buyer');
-      const tickets = i.options.getInteger('tickets');
 
-      const brand = BRANDS.find(function (b) {
-        return b.name.toLowerCase() === String(brandName || '').toLowerCase();
-      });
-
-      if (!brand) {
-        return i.editReply({
-          content: 'Unknown brand. Available: ' + BRANDS.map(function (b) { return b.name; }).join(', '),
-        });
-      }
-
-      const tzName = brand.timezone || 'America/Chicago';
-      const window = weekWindow(new Date(), brand.week_start || 'sun', tzName);
-     const title = 'Raffle';
-
-      const store = storeFor(brand.sheet_id);
-      await store.init();
-
-      let sheet = store.doc.sheetsByTitle[title];
-
-      if (!sheet) {
-        sheet = await store.doc.addSheet({
-          title: title,
-          headerValues: [
-            [
-    'ts_iso',
-    'ts_epoch',
-    'brand',
-    'seller_name',
-    'seller_id',
-    'buyer_name',
-    'tickets',
-]
-          ],
-        });
-
-        console.log('Created raffle tab: ' + title);
-      }
-
-      const ts = dayjsBase.tz(new Date(), tzName);
-
-      await sheet.addRow({
-    ts_iso: ts.toISOString(),
-    ts_epoch: ts.valueOf(),
-    brand: brand.name,
-    seller_name: i.member.displayName,
-    seller_id: i.user.id,
-    buyer_name: buyer,
-    tickets: tickets,
-});
-
-      return i.editReply({
-        content:
-          '✅ Logged ' +
-          tickets +
-          ' raffle ticket(s) for ' +
-          buyer.username +
-          ' under ' +
-          brand.name +
-          '.',
-      });
-    }
       const brand = BRANDS.find(function (b) {
         return b.name.toLowerCase() === String(brandName || '').toLowerCase();
       });
@@ -418,9 +353,7 @@ client.on('interactionCreate', async function (i) {
         return b.name.toLowerCase() === String(brandName || '').toLowerCase();
       });
 
-      if (!brand) {
-        return i.editReply({ content: 'Unknown brand.' });
-      }
+      if (!brand) return i.editReply({ content: 'Unknown brand.' });
 
       const ref = dateIso ? dayjsBase.tz(dateIso, brand.timezone) : dayjsBase.tz(new Date(), brand.timezone);
       const window = weekWindow(ref, brand.week_start || 'sun', brand.timezone);
@@ -463,6 +396,69 @@ client.on('interactionCreate', async function (i) {
         (lines.join('\n') || '_no rows_');
 
       return i.editReply({ content });
+    }
+
+    if (i.commandName === 'raffle') {
+      const brandName = i.options.getString('brand');
+      const buyer = i.options.getString('buyer');
+      const tickets = i.options.getInteger('tickets');
+
+      const brand = BRANDS.find(function (b) {
+        return b.name.toLowerCase() === String(brandName || '').toLowerCase();
+      });
+
+      if (!brand) {
+        return i.editReply({
+          content: 'Unknown brand. Available: ' + BRANDS.map(function (b) { return b.name; }).join(', '),
+        });
+      }
+
+      const title = 'Raffle';
+      const tzName = brand.timezone || 'America/Chicago';
+      const ts = dayjsBase.tz(new Date(), tzName);
+
+      const store = storeFor(brand.sheet_id);
+      await store.init();
+
+      let sheet = store.doc.sheetsByTitle[title];
+
+      if (!sheet) {
+        sheet = await store.doc.addSheet({
+          title: title,
+          headerValues: [
+            'ts_iso',
+            'ts_epoch',
+            'brand',
+            'seller_name',
+            'seller_id',
+            'buyer_name',
+            'tickets',
+          ],
+        });
+
+        console.log('Created raffle tab: ' + title);
+      }
+
+      await sheet.addRow({
+        ts_iso: ts.toISOString(),
+        ts_epoch: ts.valueOf(),
+        brand: brand.name,
+        seller_name: i.member && i.member.displayName ? i.member.displayName : i.user.username,
+        seller_id: i.user.id,
+        buyer_name: buyer,
+        tickets: tickets,
+      });
+
+      return i.editReply({
+        content:
+          '✅ Logged ' +
+          tickets +
+          ' raffle ticket(s) for "' +
+          buyer +
+          '" under ' +
+          brand.name +
+          '.',
+      });
     }
   } catch (e) {
     console.error('interaction error', e);
