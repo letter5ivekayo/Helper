@@ -154,7 +154,7 @@ function extractField(embed, key) {
   return v;
 }
 
-function weekWindow(refDate, startOn = 'sun', tzName = 'America/Phoenix') {
+function weekWindow(refDate, startOn = 'sat', tzName = 'America/Phoenix') {
   const d = dayjsBase.tz(refDate, tzName);
   const weekday = d.day();
   const offset = startOn === 'mon' ? (weekday === 0 ? 6 : weekday - 1) : weekday;
@@ -218,8 +218,8 @@ client.on('ready', async () => {
   }
 
   for (const brand of BRANDS) {
-    const tzName = brand.timezone || 'America/Phoenix';
-    new cron.CronJob(
+    const tzName = brand.timezone || 'America/Chicago';
+    new .CronJob(
       '59 23 * * 0',
       async () => {
         try {
@@ -252,7 +252,7 @@ client.on('interactionCreate', async (i) => {
       if (!brand) return i.editReply({ content: `Unknown brand. Available: ${BRANDS.map(b => b.name).join(', ')}` });
 
       const ref = dateIso ? dayjsBase.tz(dateIso, brand.timezone) : dayjsBase.tz(new Date(), brand.timezone);
-      const { start, end } = weekWindow(ref, brand.week_start || 'sun', brand.timezone);
+      const { start, end } = weekWindow(ref, brand.week_start || 'sat', brand.timezone);
       const out = await buildWeeklySummary(brand, start, end);
       return i.editReply({ embeds: [out.embed] });
     }
@@ -265,7 +265,7 @@ client.on('interactionCreate', async (i) => {
       if (!brand) return i.editReply({ content: 'Unknown brand.' });
 
       const ref = dateIso ? dayjsBase.tz(dateIso, brand.timezone) : dayjsBase.tz(new Date(), brand.timezone);
-      const { start, end } = weekWindow(ref, brand.week_start || 'sun', brand.timezone);
+      const { start, end } = weekWindow(ref, brand.week_start || 'sat', brand.timezone);
 
       const store = storeFor(brand.sheet_id);
       const rows = await store.fetchRange(brand.name, start.valueOf(), end.valueOf());
@@ -354,7 +354,7 @@ async function buildWeeklySummary(brand, start, end) {
 
 async function postWeeklySummary(brand) {
   const channel = await client.channels.fetch(brand.payouts_channel_id);
-  const { start, end } = weekWindow(new Date(), brand.week_start || 'sun', brand.timezone);
+  const { start, end } = weekWindow(new Date(), brand.week_start || 'sat', brand.timezone);
   const out = await buildWeeklySummary(brand, start, end);
   await channel.send({ embeds: [out.embed] });
 }
