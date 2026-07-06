@@ -376,15 +376,14 @@ client.on('interactionCreate', async function (i) {
       const ts = dayjsBase.tz(new Date(), tzName);
 
       await sheet.addRow({
-        ts_iso: ts.toISOString(),
-        ts_epoch: ts.valueOf(),
-        brand: brand.name,
-        seller_name: i.member && i.member.displayName ? i.member.displayName : i.user.username,
-        seller_id: i.user.id,
-        buyer_name: buyer.username,
-        buyer_id: buyer.id,
-        tickets: tickets,
-      });
+    ts_iso: ts.toISOString(),
+    ts_epoch: ts.valueOf(),
+    brand: brand.name,
+    seller_name: i.member.displayName,
+    seller_id: i.user.id,
+    buyer_name: buyer,
+    tickets: tickets,
+});
 
       return i.editReply({
         content:
