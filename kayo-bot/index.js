@@ -263,7 +263,12 @@ const commands = [
     description: 'Log raffle tickets',
     options: [
       { name: 'brand', description: 'Brand name', type: 3, required: true },
-      { name: 'buyer', description: 'Who bought the tickets', type: 6, required: true },
+     {
+  name: 'buyer',
+  description: 'Buyer name',
+  type: 3,
+  required: true,
+}
       { name: 'tickets', description: 'How many tickets', type: 4, required: true, min_value: 1 },
     ],
   },
