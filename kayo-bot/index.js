@@ -176,7 +176,14 @@ class SheetStore {
     return cleaned;
   }
 }
+const stores = new Map();
 
+function storeFor(sheetId) {
+  if (!stores.has(sheetId)) {
+    stores.set(sheetId, new SheetStore(sheetId));
+  }
+  return stores.get(sheetId);
+}
 // ---------- Helpers ----------
 function hasPaidEmbed(embed) {
   const title = (embed.title || '').toLowerCase();
