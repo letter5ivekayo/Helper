@@ -459,8 +459,7 @@ client.on('interactionCreate', async function (i) {
           brand.name +
           '.',
       });
-    }
-  } catch (e) {
+      } catch (e) {
     console.error('interaction error', e);
 
     try {
@@ -468,6 +467,7 @@ client.on('interactionCreate', async function (i) {
     } catch (_) {}
   }
 });
+
 client.on('messageCreate', async function (m) {
   try {
     const brand = BRANDS.find(function (b) {
