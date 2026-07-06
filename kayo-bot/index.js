@@ -39,8 +39,8 @@ class SheetStore {
       email: SERVICE_EMAIL,
       key: PRIVATE_KEY,
       scopes: [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive',
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
       ],
     });
 
@@ -48,30 +48,139 @@ class SheetStore {
     await this.doc.loadInfo();
 
     this.raw =
-      this.doc.sheetsByTitle['raw'] ||
+      this.doc.sheetsByTitle["raw"] ||
       (await this.doc.addSheet({
-        title: 'raw',
+        title: "raw",
         headerValues: [
-          'discord_message_id',
-          'brand',
-          'ts_iso',
-          'ts_epoch',
-          'employee_display',
-          'employee_id',
-          'job_name',
-          'amount',
-          'memo',
-          'invoiced_by',
-          'invoice_status',
+          "discord_message_id",
+          "brand",
+          "ts_iso",
+          "ts_epoch",
+          "employee_display",
+          "employee_id",
+          "job_name",
+          "amount",
+          "memo",
+          "invoiced_by",
+          "invoice_status",
         ],
       }));
 
-    await this.raw.loadHeaderRow(1);
+    await this.raw.loadHeaderRow();
+
     this.ready = true;
   }
 
-  async append(row) {
+  async ensureWeeklySheet(brand) {
     await this.init();
+
+    const now = dayjsBase.tz(new Date(), brand.timezone);
+
+    const weekStart =
+      (brand.week_start || "sun").toLowerCase() === "mon"
+        ? now.startOf("isoWeek")
+        : now.startOf("week");
+
+    const sheetName = weekStart.format("YYYY-MM-DD");
+
+    let sheet = this.doc.sheetsByTitle[sheetName];
+
+    if (!sheet) {
+      sheet = await this.doc.addSheet({
+        title: sheetName,
+        headerValues: [
+          "discord_message_id",
+          "brand",
+          "ts_iso",
+          "ts_epoch",
+          "employee_display",
+          "employee_id",
+          "job_name",
+          "amount",
+          "memo",
+          "invoiced_by",
+          "invoice_status",
+        ],
+      });
+
+      console.log(`✅ Created weekly sheet ${sheetName}`);
+    }
+
+    return sheet;
+  }
+
+  async append(row, brand) {
+    await this.init();
+
+    const weeklySheet = await this.ensureWeeklySheet(brand);
+
+    await weeklySheet.loadCells("A:A");
+
+    const ids = new Set();
+
+    for (let r = 1; r < weeklySheet.rowCount; r++) {
+      const cell = weeklySheet.getCell(r, 0);
+
+      if (!cell.value) break;
+
+      ids.add(String(cell.value));
+    }
+
+    if (ids.has(String(row.discord_message_id))) {
+      return { deduped: true };
+    }
+
+    await weeklySheet.addRow(row);
+
+    return { ok: true };
+  }
+
+  async fetchRange(brand, startEpoch, endEpoch) {
+    await this.init();
+
+    const rows = [];
+
+    for (const sheet of Object.values(this.doc.sheetsByTitle)) {
+      if (sheet.title === "raw") continue;
+
+      await sheet.loadHeaderRow();
+
+      const data = await sheet.getRows();
+
+      rows.push(...data);
+    }
+
+    const wantBrand = brand.toLowerCase();
+
+    const cleaned = [];
+
+    for (const r of rows) {
+      const rowBrand = String(r.get("brand") || "").toLowerCase();
+
+      if (rowBrand !== wantBrand) continue;
+
+      const tsEpoch = Number(r.get("ts_epoch"));
+
+      if (tsEpoch < startEpoch || tsEpoch >= endEpoch) continue;
+
+      cleaned.push({
+        discord_message_id: r.get("discord_message_id"),
+        brand: r.get("brand"),
+        ts_iso: r.get("ts_iso"),
+        ts_epoch: tsEpoch,
+        employee_display: r.get("employee_display"),
+        employee_id: r.get("employee_id"),
+        job_name: r.get("job_name"),
+        amount: Number(r.get("amount") || 0),
+        memo: r.get("memo"),
+        invoiced_by: r.get("invoiced_by"),
+        invoice_status: r.get("invoice_status"),
+      });
+    }
+
+    return cleaned;
+  }
+}
 
     // de-dupe by discord_message_id
     await this.raw.loadCells('A:A');
@@ -319,7 +428,7 @@ client.on('messageCreate', async (m) => {
       };
 
       const store = storeFor(brand.sheet_id);
-      await store.append(row);
+      await store.append(row, brand);
     }
   } catch (e) {
     console.error('message handler error', e);
