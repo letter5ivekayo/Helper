@@ -367,7 +367,7 @@ client.on('messageCreate', async (m) => {
       };
 
       const store = storeFor(brand.sheet_id);
-      await store.append(row);
+      await store.append(row, brand);
     }
   } catch (e) {
     console.error('message handler error', e);
