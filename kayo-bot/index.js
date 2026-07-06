@@ -439,14 +439,14 @@ client.on('interactionCreate', async function (i) {
       }
 
       await sheet.addRow({
-        ts_iso: ts.toISOString(),
-        ts_epoch: ts.valueOf(),
-        brand: brand.name,
-        seller_name: buyer,
-        seller_id: i.user.id,
-        buyer_name: buyer,
-        tickets: tickets,
-      });
+  ts_iso: ts.toISOString(),
+  ts_epoch: ts.valueOf(),
+  brand: brand.name,
+  seller_name: buyer,
+  seller_id: '',
+  buyer_name: buyer,
+  tickets: tickets,
+});
 
       return i.editReply({
         content:
