@@ -97,7 +97,7 @@ class SheetStore {
         headerValues: PAYOUT_HEADERS,
       }));
 
-    await sheet.loadHeaderRow(1);
+    await this.raw.loadHeaderRow(1);
     this.ready = true;
   }
 
@@ -276,8 +276,14 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 
   await rest.put(Routes.applicationCommands(appId), {
-    body: commands,
-  });
+  body: [],
+});
+
+await new Promise(resolve => setTimeout(resolve, 3000));
+
+await rest.put(Routes.applicationCommands(appId), {
+  body: commands,
+});
 
   console.log('Slash commands registered');
 }
