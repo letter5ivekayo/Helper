@@ -176,7 +176,6 @@ class SheetStore {
     return cleaned;
   }
 }
-}
 
 // ---------- Helpers ----------
 function hasPaidEmbed(embed) {
