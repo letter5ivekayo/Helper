@@ -282,7 +282,7 @@ async function registerCommands() {
   console.log('Slash commands registered');
 }
 
-client.on('ready', async function () {
+client.once('clientReady', async function () {
   console.log('Logged in as ' + client.user.tag);
 
   try {
