@@ -97,7 +97,7 @@ class SheetStore {
         headerValues: PAYOUT_HEADERS,
       }));
 
-    await this.raw.loadHeaderRow(1);
+    await sheet.loadHeaderRow(1);
     this.ready = true;
   }
 
@@ -124,7 +124,7 @@ class SheetStore {
       console.log('Created weekly tab: ' + title);
     }
 
-    await sheet.loadHeaderRow(1);
+    .loadHeaderRow(1);
     return sheet;
   }
 
@@ -438,7 +438,7 @@ client.on('interactionCreate', async function (i) {
         console.log('Created raffle tab: ' + title);
       }
 
-      await sheet.addRow({
+await sheet.addRow({
   ts_iso: ts.toISOString(),
   ts_epoch: ts.valueOf(),
   brand: brand.name,
