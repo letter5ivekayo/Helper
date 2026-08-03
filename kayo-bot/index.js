@@ -40,6 +40,12 @@ const PAYOUT_HEADERS = [
   'invoice_status',
 ];
 
+const WEEKLY_SALES_HEADERS = [
+  'Date',
+  'Employee',
+  'Amount',
+];
+
 function weekWindow(refDate, startOn = 'sat', tzName = 'America/Chicago') {
   const d = dayjsBase.tz(refDate, tzName);
   const weekday = d.day();
@@ -74,6 +80,75 @@ function safeTabTitle(value) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 100);
+}
+
+const SHEET_COLORS = {
+  purple: { red: 0.36, green: 0.10, blue: 0.62 },
+  black: { red: 0.06, green: 0.06, blue: 0.08 },
+  white: { red: 1, green: 1, blue: 1 },
+};
+
+async function styleWeeklySheet(sheet) {
+  await sheet.updateProperties({
+    tabColor: SHEET_COLORS.purple,
+    gridProperties: { frozenRowCount: 1 },
+  });
+
+  await sheet.updateDimensionProperties('COLUMNS', { pixelSize: 125 }, {
+    startIndex: 0,
+    endIndex: 1,
+  });
+  await sheet.updateDimensionProperties('COLUMNS', { pixelSize: 220 }, {
+    startIndex: 1,
+    endIndex: 2,
+  });
+  await sheet.updateDimensionProperties('COLUMNS', { pixelSize: 130 }, {
+    startIndex: 2,
+    endIndex: 3,
+  });
+
+  await sheet.loadCells('A1:C1');
+
+  for (let col = 0; col < 3; col++) {
+    const cell = sheet.getCell(0, col);
+    cell.backgroundColor = SHEET_COLORS.purple;
+    cell.textFormat = {
+      bold: true,
+      foregroundColor: SHEET_COLORS.white,
+      fontSize: 12,
+    };
+    cell.horizontalAlignment = 'CENTER';
+    cell.verticalAlignment = 'MIDDLE';
+  }
+
+  await sheet.saveUpdatedCells();
+}
+
+async function styleWeeklyRow(sheet, rowNumber) {
+  await sheet.loadCells('A' + rowNumber + ':C' + rowNumber);
+
+  const darkRow = rowNumber % 2 === 0;
+  const background = darkRow ? SHEET_COLORS.black : SHEET_COLORS.white;
+  const foreground = darkRow ? SHEET_COLORS.white : SHEET_COLORS.black;
+
+  for (let col = 0; col < 3; col++) {
+    const cell = sheet.getCell(rowNumber - 1, col);
+    cell.backgroundColor = background;
+    cell.textFormat = { foregroundColor: foreground };
+    cell.verticalAlignment = 'MIDDLE';
+  }
+
+  sheet.getCell(rowNumber - 1, 0).horizontalAlignment = 'CENTER';
+  sheet.getCell(rowNumber - 1, 1).horizontalAlignment = 'LEFT';
+
+  const amountCell = sheet.getCell(rowNumber - 1, 2);
+  amountCell.horizontalAlignment = 'RIGHT';
+  amountCell.numberFormat = {
+    type: 'CURRENCY',
+    pattern: '$#,##0.00',
+  };
+
+  await sheet.saveUpdatedCells();
 }
 
 class SheetStore {
@@ -116,7 +191,7 @@ class SheetStore {
     const window = weekWindow(refDate, startOn, tzName);
 
     return safeTabTitle(
-      brand.name + ' - Week ' + window.start.format('MM-DD-YYYY')
+      brand.name + ' - Sales - Week ' + window.start.format('MM-DD-YYYY')
     );
   }
 
@@ -129,13 +204,14 @@ class SheetStore {
     if (!sheet) {
       sheet = await this.doc.addSheet({
         title,
-        headerValues: PAYOUT_HEADERS,
+        headerValues: WEEKLY_SALES_HEADERS,
       });
 
       console.log('Created weekly tab: ' + title);
     }
 
     await sheet.loadHeaderRow(1);
+    await styleWeeklySheet(sheet);
     return sheet;
   }
 
@@ -159,7 +235,15 @@ class SheetStore {
     await this.raw.addRow(row);
 
     const weeklySheet = await this.ensureWeeklyTab(brand);
-    await weeklySheet.addRow(row);
+    const tzName = brand.timezone || 'America/Chicago';
+
+    const weeklyRow = await weeklySheet.addRow({
+      Date: dayjsBase.tz(row.ts_iso, tzName).format('MM/DD/YYYY'),
+      Employee: row.invoiced_by || row.employee_display || '',
+      Amount: row.amount,
+    });
+
+    await styleWeeklyRow(weeklySheet, weeklyRow.rowNumber);
 
     return { ok: true };
   }
@@ -577,4 +661,3 @@ async function postWeeklySummary(brand) {
 }
 
 client.login(process.env.BOT_TOKEN);
-
