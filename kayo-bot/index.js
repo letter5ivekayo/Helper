@@ -1,3 +1,4 @@
+
 // AstroRP Payout Bot — weekly payout tabs
 
 import 'dotenv/config';
@@ -67,6 +68,14 @@ function fmt(n) {
   }).format(n || 0);
 }
 
+function safeTabTitle(value) {
+  return String(value || 'Business')
+    .replace(/[\\/\?\*\[\]:]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+}
+
 class SheetStore {
   constructor(sheetId) {
     this.sheetId = sheetId;
@@ -106,7 +115,9 @@ class SheetStore {
     const startOn = brand.week_start || 'sat';
     const window = weekWindow(refDate, startOn, tzName);
 
-    return 'Week ' + window.start.format('MM-DD-YYYY');
+    return safeTabTitle(
+      brand.name + ' - Week ' + window.start.format('MM-DD-YYYY')
+    );
   }
 
   async ensureWeeklyTab(brand, refDate = new Date()) {
@@ -566,3 +577,4 @@ async function postWeeklySummary(brand) {
 }
 
 client.login(process.env.BOT_TOKEN);
+
