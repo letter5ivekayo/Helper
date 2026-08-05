@@ -393,9 +393,8 @@ const commands = [
   },
   {
     name: 'finalpay',
-    description: 'Show final payouts for every employee for a brand and week',
+    description: 'Show final payouts for every business for a week',
     options: [
-      { name: 'brand', description: 'Brand name', type: 3, required: true },
       { name: 'week_start_iso', description: 'Any ISO date in the week', type: 3 },
     ],
   },
@@ -597,26 +596,34 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    if (interaction.commandName === 'finalpay') {
+      const dateIso = interaction.options.getString('week_start_iso');
+      const embeds = [];
+
+      for (const payoutBrand of BRANDS) {
+        const reference = parseReference(dateIso, payoutBrand);
+        const { start, end } = weekWindow(
+          reference,
+          payoutBrand.week_start,
+          payoutBrand.timezone
+        );
+        embeds.push(...await buildFinalPayEmbeds(payoutBrand, start, end));
+      }
+
+      // Keep every business separate while sending all reports from one command.
+      await interaction.editReply({ embeds: embeds.slice(0, 10) });
+      for (let index = 10; index < embeds.length; index += 10) {
+        await interaction.followUp({ embeds: embeds.slice(index, index + 10) });
+      }
+      return;
+    }
+
     const brandName = interaction.options.getString('brand');
     const brand = findBrand(brandName);
     if (!brand) {
       await interaction.editReply({
         content: `Unknown brand. Available: ${BRANDS.map(item => item.name).join(', ')}`,
       });
-      return;
-    }
-
-    if (interaction.commandName === 'finalpay') {
-      const reference = parseReference(
-        interaction.options.getString('week_start_iso'),
-        brand
-      );
-      const { start, end } = weekWindow(reference, brand.week_start, brand.timezone);
-      const embeds = await buildFinalPayEmbeds(brand, start, end);
-      await interaction.editReply({ embeds: embeds.slice(0, 10) });
-      for (let index = 10; index < embeds.length; index += 10) {
-        await interaction.followUp({ embeds: embeds.slice(index, index + 10) });
-      }
       return;
     }
 
@@ -721,4 +728,3 @@ client.on('messageCreate', async message => {
 });
 
 client.login(process.env.BOT_TOKEN);
-
