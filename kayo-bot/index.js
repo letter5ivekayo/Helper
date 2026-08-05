@@ -306,8 +306,18 @@ async function registerCommands() {
     return;
   }
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-  await rest.put(Routes.applicationCommands(process.env.APPLICATION_ID), { body: commands });
-  console.log('Slash commands registered');
+  const route = process.env.GUILD_ID
+    ? Routes.applicationGuildCommands(process.env.APPLICATION_ID, process.env.GUILD_ID)
+    : Routes.applicationCommands(process.env.APPLICATION_ID);
+
+  // PUT replaces the existing command definitions, removing the old required
+  // brand option from /payout. Guild commands update immediately.
+  await rest.put(route, { body: commands });
+  console.log(
+    process.env.GUILD_ID
+      ? `Slash commands registered for guild ${process.env.GUILD_ID}`
+      : 'Global slash commands registered'
+  );
 }
 
 async function buildWeeklySummary(brand, start, end) {
