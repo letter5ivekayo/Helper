@@ -404,24 +404,25 @@ async function buildFinalPayEmbeds(brand, start, end) {
   const grossTotal = employees.reduce((sum, item) => sum + item.gross, 0);
   const commissionTotal = employees.reduce((sum, item) => sum + item.commission, 0);
   const paycheckTotal = employees.reduce((sum, item) => sum + item.paycheck, 0);
+  const paidCount = employees.filter(item => paidKeys.has(employeeKey(item.employee))).length;
   const endInclusive = end.subtract(1, 'day');
 
   return pages.map((pageEmployees, pageIndex) => {
     const embed = new EmbedBuilder()
-      .setColor(brand.embed_color || 0x5865f2)
-      .setTitle(`${brand.name} | Final Payroll${pages.length > 1 ? ` | Page ${pageIndex + 1} of ${pages.length}` : ''}`)
+      .setColor(employees.length > 0 && paidCount === employees.length ? 0x22c55e : (brand.embed_color || 0x7d3fd6))
+      .setTitle(`${brand.name}  •  Payroll Overview`)
       .setDescription(
-        `**Pay period:** ${start.format('MMM D')} - ${endInclusive.format('MMM D, YYYY')}\n` +
-        `**Formula:** Sales x ${percentageLabel(commissionRate)} commission x ` +
-        `${percentageLabel(paycheckRate)} paycheck rate`
+        `### ${start.format('MMM D')} — ${endInclusive.format('MMM D, YYYY')}\n` +
+        `> **${paidCount}/${employees.length} paid**  •  Saturday–Friday\n` +
+        `> ${percentageLabel(commissionRate)} commission  →  ${percentageLabel(paycheckRate)} paycheck rate`
       )
       .addFields(
-        { name: 'Total Sales', value: fmt(grossTotal), inline: true },
-        { name: 'Total Commission', value: fmt(commissionTotal), inline: true },
-        { name: 'Total Payroll', value: `**${fmt(paycheckTotal)}**`, inline: true }
+        { name: '💰 SALES', value: `### ${fmt(grossTotal)}`, inline: true },
+        { name: '📈 COMMISSION', value: `### ${fmt(commissionTotal)}`, inline: true },
+        { name: '💵 PAYROLL', value: `### ${fmt(paycheckTotal)}`, inline: true }
       )
       .setFooter({
-        text: `${employees.length} employees | ${rows.length} paid sales | Saturday-Friday`,
+        text: `${employees.length} employees  •  ${rows.length} sales${pages.length > 1 ? `  •  Page ${pageIndex + 1}/${pages.length}` : ''}`,
       })
       .setTimestamp(new Date());
 
@@ -433,12 +434,12 @@ async function buildFinalPayEmbeds(brand, start, end) {
         const salesLabel = item.sales === 1 ? 'sale' : 'sales';
         const isPaid = paidKeys.has(employeeKey(item.employee));
         return {
-          name: `${isPaid ? '🟢 ✅' : '⚪'} ${overallIndex}. ${item.employee}`.slice(0, 256),
+          name: `${isPaid ? '🟢' : '⚪'}  ${overallIndex}. ${item.employee}`.slice(0, 256),
           value:
-            `Status: **${isPaid ? 'PAID' : 'UNPAID'}**\n` +
-            `Sales: **${fmt(item.gross)}** (${item.sales} ${salesLabel})\n` +
-            `Commission: ${fmt(item.commission)}\n` +
-            `Paycheck: **${fmt(item.paycheck)}**`,
+            `**${isPaid ? 'PAID ✓' : 'UNPAID'}**\n` +
+            `Sales · ${fmt(item.gross)} · ${item.sales} ${salesLabel}\n` +
+            `Commission · ${fmt(item.commission)}\n` +
+            `**Paycheck · ${fmt(item.paycheck)}**`,
           inline: true,
         };
       }));
@@ -456,7 +457,7 @@ async function buildPaidChecklistComponents(brand, brandIndex, start, end) {
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`mark-paid-employees:${brandIndex}:${start.format('YYYY-MM-DD')}`)
-    .setPlaceholder('Managers: select employees to toggle Paid / Unpaid')
+    .setPlaceholder('Update payment status…')
     .setMinValues(1)
     .setMaxValues(visibleEmployees.length)
     .addOptions(visibleEmployees.map((item, index) => ({
@@ -1136,7 +1137,3 @@ client.on('messageCreate', async message => {
 });
 
 client.login(process.env.BOT_TOKEN);
-
-
-
-
