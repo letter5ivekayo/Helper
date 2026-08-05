@@ -7,6 +7,11 @@ import {
   Routes,
   EmbedBuilder,
   MessageFlags,
+  ActionRowBuilder,
+  ModalBuilder,
+  StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from 'discord.js';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
@@ -200,6 +205,21 @@ class SheetStore {
     let sheet = this.doc.sheetsByTitle[title];
     if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
     else await sheet.loadHeaderRow(1);
+    return sheet;
+  }
+
+  async reimbursementSheet(brand) {
+    await this.init();
+    const title = safeSheetTitle(`${brand.name}__Reimbursements`);
+    const headers = ['ts_iso', 'ts_epoch', 'brand', 'logged_by', 'logged_by_id', 'employee', 'amount', 'reason', 'notes'];
+
+    let sheet = this.doc.sheetsByTitle[title];
+    if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
+    else {
+      await sheet.loadHeaderRow(1);
+      const missing = headers.filter(header => !sheet.headerValues.includes(header));
+      if (missing.length) throw new Error(`${title} is missing columns: ${missing.join(', ')}`);
+    }
     return sheet;
   }
 }
@@ -408,6 +428,10 @@ const commands = [
     ],
   },
   {
+    name: 'reimbursement',
+    description: 'Open the reimbursement logging form',
+  },
+  {
     name: 'raffle',
     description: 'Log raffle tickets',
     options: [
@@ -568,12 +592,76 @@ client.once('clientReady', async () => {
 
 // Intentionally one interactionCreate handler so every command is acknowledged once.
 client.on('interactionCreate', async interaction => {
+  if (interaction.isStringSelectMenu() && interaction.customId === 'reimbursement-brand') {
+    const brandIndex = Number(interaction.values[0]);
+    const brand = BRANDS[brandIndex];
+    if (!brand) {
+      await interaction.update({ content: 'That business is no longer configured.', components: [] });
+      return;
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`reimbursement-modal:${brandIndex}`)
+      .setTitle(`${brand.name} Reimbursement`)
+      .addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('employee').setLabel('Employee being reimbursed').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('amount').setLabel('Reimbursement amount').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('notes').setLabel('Additional notes').setStyle(TextInputStyle.Paragraph).setRequired(false))
+      );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('reimbursement-modal:')) {
+    const [, brandIndexText] = interaction.customId.split(':');
+    const brand = BRANDS[Number(brandIndexText)];
+    if (!brand) return;
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const timestamp = dayjs().tz(brand.timezone);
+      const loggedBy = interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
+      const sheet = await storeFor(brand.sheet_id).reimbursementSheet(brand);
+      const notes = interaction.fields.getTextInputValue('notes').trim();
+      const amountText = interaction.fields.getTextInputValue('amount');
+      const amount = Number(amountText.replace(/[^0-9.-]/g, ''));
+      if (!Number.isFinite(amount) || amount < 0) throw new Error('Enter a valid reimbursement amount');
+      await sheet.addRow({
+        ts_iso: timestamp.toISOString(), ts_epoch: timestamp.valueOf(), brand: brand.name,
+        logged_by: loggedBy, logged_by_id: interaction.user.id,
+        employee: interaction.fields.getTextInputValue('employee').trim(), amount,
+        reason: interaction.fields.getTextInputValue('reason').trim(), notes,
+      });
+      await interaction.editReply(`Reimbursement of **${fmt(amount)}** saved for **${brand.name}**.`);
+    } catch (error) {
+      console.error('Business log error:', error);
+      await interaction.editReply(`Could not save entry: ${error.message}`);
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
-  if (!['payout', 'finalpay', 'payout-employee', 'raffle'].includes(interaction.commandName)) return;
+  if (!['payout', 'finalpay', 'payout-employee', 'reimbursement', 'raffle'].includes(interaction.commandName)) return;
 
   const ephemeral = interaction.commandName === 'payout-employee';
   try {
     await interaction.deferReply({ flags: ephemeral ? MessageFlags.Ephemeral : undefined });
+
+    if (interaction.commandName === 'reimbursement') {
+      const brandMenu = new StringSelectMenuBuilder()
+        .setCustomId('reimbursement-brand')
+        .setPlaceholder('Choose a business')
+        .addOptions(BRANDS.slice(0, 25).map((brand, index) => ({
+          label: brand.name.slice(0, 100),
+          value: String(index),
+        })));
+      await interaction.editReply({
+        content: '**Log a Reimbursement**\nChoose the business.',
+        components: [new ActionRowBuilder().addComponents(brandMenu)],
+      });
+      return;
+    }
 
     if (interaction.commandName === 'payout') {
       const dateIso = interaction.options.getString('week_start_iso');
