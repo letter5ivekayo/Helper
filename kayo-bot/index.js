@@ -257,6 +257,123 @@ function limitEmbedText(lines, limit = 1024) {
   return text || '_no paid invoices_';
 }
 
+function percentageRate(value, label, brand) {
+  const numeric = Number(String(value).replace('%', '').trim());
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    throw new Error(`${brand.name}: ${label} must be a non-negative number`);
+  }
+  return numeric > 1 ? numeric / 100 : numeric;
+}
+
+function commissionRateFor(brand) {
+  const configured =
+    brand.commission_percentage ??
+    brand.commission_percent ??
+    brand.payout_percentage ??
+    brand.payout_percent ??
+    process.env.COMMISSION_PERCENTAGE ??
+    process.env.PAYOUT_PERCENTAGE ??
+    40;
+  return percentageRate(configured, 'commission percentage', brand);
+}
+
+function paycheckRateFor(brand) {
+  const configured =
+    brand.paycheck_percentage ??
+    brand.paycheck_percent ??
+    process.env.PAYCHECK_PERCENTAGE ??
+    20;
+  return percentageRate(configured, 'paycheck percentage', brand);
+}
+
+function percentageLabel(rate) {
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(rate * 100)}%`;
+}
+
+function groupPayoutsByEmployee(rows, commissionRate, paycheckRate) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const displayName = String(row.invoiced_by || 'UNKNOWN').trim().replace(/\s+/g, ' ') || 'UNKNOWN';
+    const key = displayName.toLocaleLowerCase('en-US');
+    const current = grouped.get(key) || { employee: displayName, gross: 0, sales: 0 };
+    current.gross += row.amount;
+    current.sales += 1;
+    grouped.set(key, current);
+  }
+
+  return [...grouped.values()]
+    .map(item => {
+      const commission = item.gross * commissionRate;
+      return { ...item, commission, paycheck: commission * paycheckRate };
+    })
+    .sort((a, b) => b.paycheck - a.paycheck || a.employee.localeCompare(b.employee));
+}
+
+async function buildFinalPayEmbeds(brand, start, end) {
+  const rows = await storeFor(brand.sheet_id).fetchRange(
+    brand,
+    start.valueOf(),
+    end.valueOf()
+  );
+  const commissionRate = commissionRateFor(brand);
+  const paycheckRate = paycheckRateFor(brand);
+  const employees = groupPayoutsByEmployee(rows, commissionRate, paycheckRate);
+  const lines = employees.map((item, index) => {
+    const salesLabel = item.sales === 1 ? 'sale' : 'sales';
+    return `**${index + 1}. ${item.employee}**\n` +
+      `Total Sales: **${fmt(item.gross)}** (${item.sales} ${salesLabel} added together)\n` +
+      `Commission (${percentageLabel(commissionRate)}): **${fmt(item.commission)}** | ` +
+      `Paycheck (${percentageLabel(paycheckRate)} after commission): **${fmt(item.paycheck)}**`;
+  });
+
+  const pages = [];
+  let page = [];
+  let length = 0;
+  for (const line of lines) {
+    if (page.length && length + line.length + 1 > 3500) {
+      pages.push(page);
+      page = [];
+      length = 0;
+    }
+    page.push(line);
+    length += line.length + 1;
+  }
+  if (page.length || pages.length === 0) pages.push(page);
+
+  const grossTotal = employees.reduce((sum, item) => sum + item.gross, 0);
+  const commissionTotal = employees.reduce((sum, item) => sum + item.commission, 0);
+  const paycheckTotal = employees.reduce((sum, item) => sum + item.paycheck, 0);
+  const endInclusive = end.subtract(1, 'day');
+
+  return pages.map((pageLines, index) => {
+    const embed = new EmbedBuilder()
+      .setColor(brand.embed_color || 0x5865f2)
+      .setTitle(`${brand.name} - Final Pay${pages.length > 1 ? ` (${index + 1}/${pages.length})` : ''}`)
+      .setDescription(
+        `**${start.format('MMMM D')} - ${endInclusive.format('MMMM D, YYYY')}**\n` +
+        `Commission: **${percentageLabel(commissionRate)}** | ` +
+        `Paycheck after commission: **${percentageLabel(paycheckRate)}**`
+      )
+      .addFields({
+        name: 'Final Payouts by Employee',
+        value: pageLines.join('\n') || '_no paid invoices_',
+      })
+      .setFooter({
+        text: `${employees.length} employee${employees.length === 1 ? '' : 's'} - ${rows.length} paid invoice${rows.length === 1 ? '' : 's'}`,
+      })
+      .setTimestamp(new Date());
+
+    if (index === pages.length - 1) {
+      embed.addFields(
+        { name: 'Total Sales', value: `**${fmt(grossTotal)}**`, inline: true },
+        { name: 'Total Commission', value: `**${fmt(commissionTotal)}**`, inline: true },
+        { name: 'Total Paychecks', value: `**${fmt(paycheckTotal)}**`, inline: true }
+      );
+    }
+    return embed;
+  });
+}
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -271,6 +388,14 @@ const commands = [
     name: 'payout',
     description: 'Show weekly payout totals for all brands',
     options: [
+      { name: 'week_start_iso', description: 'Any ISO date in the week', type: 3 },
+    ],
+  },
+  {
+    name: 'finalpay',
+    description: 'Show final payouts for every employee for a brand and week',
+    options: [
+      { name: 'brand', description: 'Brand name', type: 3, required: true },
       { name: 'week_start_iso', description: 'Any ISO date in the week', type: 3 },
     ],
   },
@@ -439,7 +564,7 @@ client.once('clientReady', async () => {
 // Intentionally one interactionCreate handler so every command is acknowledged once.
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  if (!['payout', 'payout-employee', 'raffle'].includes(interaction.commandName)) return;
+  if (!['payout', 'finalpay', 'payout-employee', 'raffle'].includes(interaction.commandName)) return;
 
   const ephemeral = interaction.commandName === 'payout-employee';
   try {
@@ -478,6 +603,20 @@ client.on('interactionCreate', async interaction => {
       await interaction.editReply({
         content: `Unknown brand. Available: ${BRANDS.map(item => item.name).join(', ')}`,
       });
+      return;
+    }
+
+    if (interaction.commandName === 'finalpay') {
+      const reference = parseReference(
+        interaction.options.getString('week_start_iso'),
+        brand
+      );
+      const { start, end } = weekWindow(reference, brand.week_start, brand.timezone);
+      const embeds = await buildFinalPayEmbeds(brand, start, end);
+      await interaction.editReply({ embeds: embeds.slice(0, 10) });
+      for (let index = 10; index < embeds.length; index += 10) {
+        await interaction.followUp({ embeds: embeds.slice(index, index + 10) });
+      }
       return;
     }
 
