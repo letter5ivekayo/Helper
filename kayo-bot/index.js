@@ -250,6 +250,31 @@ class SheetStore {
       return name && Number.isFinite(price) ? [{ name, price }] : [];
     });
   }
+
+  async payrollStatusSheet(brand) {
+    await this.init();
+    const title = safeSheetTitle(`${brand.name}__Payroll_Status`);
+    const headers = ['week_start', 'brand', 'employee', 'employee_key', 'paycheck', 'paid_by', 'paid_at'];
+    let sheet = this.doc.sheetsByTitle[title];
+    if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
+    else {
+      await sheet.loadHeaderRow(1);
+      const missing = headers.filter(header => !sheet.headerValues.includes(header));
+      if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
+    }
+    return sheet;
+  }
+
+  async paidEmployeeKeys(brand, weekStart) {
+    const sheet = await this.payrollStatusSheet(brand);
+    const rows = await sheet.getRows();
+    const wantedWeek = weekStart.format('YYYY-MM-DD');
+    return new Set(rows.flatMap(row =>
+      String(row.get('week_start')) === wantedWeek
+        ? [String(row.get('employee_key') || '').trim().toLowerCase()]
+        : []
+    ));
+  }
 }
 
 const stores = new Map();
@@ -338,11 +363,15 @@ function percentageLabel(rate) {
   return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(rate * 100)}%`;
 }
 
+function employeeKey(value) {
+  return String(value || 'UNKNOWN').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+}
+
 function groupPayoutsByEmployee(rows, commissionRate, paycheckRate) {
   const grouped = new Map();
   for (const row of rows) {
     const displayName = String(row.invoiced_by || 'UNKNOWN').trim().replace(/\s+/g, ' ') || 'UNKNOWN';
-    const key = displayName.toLocaleLowerCase('en-US');
+    const key = employeeKey(displayName);
     const current = grouped.get(key) || { employee: displayName, gross: 0, sales: 0 };
     current.gross += row.amount;
     current.sales += 1;
@@ -366,6 +395,7 @@ async function buildFinalPayEmbeds(brand, start, end) {
   const commissionRate = commissionRateFor(brand);
   const paycheckRate = paycheckRateFor(brand);
   const employees = groupPayoutsByEmployee(rows, commissionRate, paycheckRate);
+  const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
   const pages = [];
   for (let index = 0; index < employees.length; index += 18) {
     pages.push(employees.slice(index, index + 18));
@@ -405,6 +435,7 @@ async function buildFinalPayEmbeds(brand, start, end) {
         return {
           name: `${overallIndex}. ${item.employee}`.slice(0, 256),
           value:
+            `Status: ${paidKeys.has(employeeKey(item.employee)) ? '**PAID**' : '**UNPAID**'}\n` +
             `Sales: **${fmt(item.gross)}** (${item.sales} ${salesLabel})\n` +
             `Commission: ${fmt(item.commission)}\n` +
             `Paycheck: **${fmt(item.paycheck)}**`,
@@ -414,6 +445,26 @@ async function buildFinalPayEmbeds(brand, start, end) {
     }
     return embed;
   });
+}
+
+async function buildPaidChecklistComponents(brand, brandIndex, start, end) {
+  const rows = await storeFor(brand.sheet_id).fetchRange(brand, start.valueOf(), end.valueOf());
+  const employees = groupPayoutsByEmployee(rows, commissionRateFor(brand), paycheckRateFor(brand));
+  const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
+  const unpaid = employees.filter(item => !paidKeys.has(employeeKey(item.employee))).slice(0, 25);
+  if (!unpaid.length) return [];
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`mark-paid-employees:${brandIndex}:${start.format('YYYY-MM-DD')}`)
+    .setPlaceholder('Managers: select employees to mark paid')
+    .setMinValues(1)
+    .setMaxValues(unpaid.length)
+    .addOptions(unpaid.map((item, index) => ({
+      label: item.employee.slice(0, 100),
+      description: `Paycheck ${fmt(item.paycheck)}`.slice(0, 100),
+      value: String(index),
+    })));
+  return [new ActionRowBuilder().addComponents(menu)];
 }
 
 const client = new Client({
@@ -587,11 +638,20 @@ async function postWeeklySummary(brand) {
   const { start, end } = weekWindow(now, 'sat', brand.timezone);
   const { embed } = await buildWeeklySummary(brand, start, end);
   const finalPayEmbeds = await buildFinalPayEmbeds(brand, start, end);
+  const components = await buildPaidChecklistComponents(
+    brand,
+    BRANDS.indexOf(brand),
+    start,
+    end
+  );
   const embeds = [embed, ...finalPayEmbeds];
 
   // Post both reports during the same closeout. Discord allows 10 embeds per message.
   for (let index = 0; index < embeds.length; index += 10) {
-    await channel.send({ embeds: embeds.slice(index, index + 10) });
+    await channel.send({
+      embeds: embeds.slice(index, index + 10),
+      components: index === 0 ? components : [],
+    });
   }
 }
 
@@ -758,6 +818,85 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  if (interaction.isStringSelectMenu() && interaction.customId === 'mark-paid-brand') {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return;
+    const brandIndex = Number(interaction.values[0]);
+    const brand = BRANDS[brandIndex];
+    if (!brand) return;
+    await interaction.deferUpdate();
+    const { start, end } = weekWindow(dayjs().tz(brand.timezone), brand.week_start, brand.timezone);
+    const rows = await storeFor(brand.sheet_id).fetchRange(brand, start.valueOf(), end.valueOf());
+    const employees = groupPayoutsByEmployee(rows, commissionRateFor(brand), paycheckRateFor(brand));
+    const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
+    const unpaid = employees.filter(item => !paidKeys.has(employeeKey(item.employee))).slice(0, 25);
+
+    if (!unpaid.length) {
+      await interaction.editReply({
+        content: `Everyone for **${brand.name}** is already marked paid for ${start.format('MM/DD')}–${end.subtract(1, 'day').format('MM/DD')}.`,
+        components: [],
+      });
+      return;
+    }
+
+    const employeeMenu = new StringSelectMenuBuilder()
+      .setCustomId(`mark-paid-employees:${brandIndex}:${start.format('YYYY-MM-DD')}`)
+      .setPlaceholder('Select everyone being marked paid')
+      .setMinValues(1)
+      .setMaxValues(unpaid.length)
+      .addOptions(unpaid.map((item, index) => ({
+        label: item.employee.slice(0, 100),
+        description: `Paycheck ${fmt(item.paycheck)}`.slice(0, 100),
+        value: String(index),
+      })));
+    await interaction.editReply({
+      content: `**${brand.name} Payroll Checklist**\n${start.format('MMM D')}–${end.subtract(1, 'day').format('MMM D, YYYY')}\nSelect one or more employees to mark paid.`,
+      components: [new ActionRowBuilder().addComponents(employeeMenu)],
+    });
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('mark-paid-employees:')) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({
+        content: 'You need the Manage Server permission to mark payroll as paid.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    const [, brandIndexText, weekStartText] = interaction.customId.split(':');
+    const brand = BRANDS[Number(brandIndexText)];
+    if (!brand) return;
+    await interaction.deferUpdate();
+    const { start, end } = weekWindow(
+      dayjs.tz(weekStartText, brand.timezone),
+      brand.week_start,
+      brand.timezone
+    );
+    const rows = await storeFor(brand.sheet_id).fetchRange(brand, start.valueOf(), end.valueOf());
+    const employees = groupPayoutsByEmployee(rows, commissionRateFor(brand), paycheckRateFor(brand));
+    const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
+    const unpaid = employees.filter(item => !paidKeys.has(employeeKey(item.employee))).slice(0, 25);
+    const selected = interaction.values.map(value => unpaid[Number(value)]).filter(Boolean);
+    const sheet = await storeFor(brand.sheet_id).payrollStatusSheet(brand);
+    const paidAt = new Date().toISOString();
+    for (const item of selected) {
+      await sheet.addRow({
+        week_start: start.format('YYYY-MM-DD'), brand: brand.name,
+        employee: item.employee, employee_key: employeeKey(item.employee),
+        paycheck: item.paycheck, paid_by: interaction.user.id, paid_at: paidAt,
+      });
+    }
+    const embeds = await buildFinalPayEmbeds(brand, start, end);
+    const components = await buildPaidChecklistComponents(
+      brand,
+      Number(brandIndexText),
+      start,
+      end
+    );
+    await interaction.editReply({ content: null, embeds: embeds.slice(0, 10), components });
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
   if (!['payout', 'finalpay', 'payout-employee', 'reimbursement', 'reimbursement-items', 'raffle'].includes(interaction.commandName)) return;
 
@@ -828,22 +967,34 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'finalpay') {
       const dateIso = interaction.options.getString('week_start_iso');
-      const embeds = [];
+      let sentFirstBusiness = false;
 
-      for (const payoutBrand of BRANDS) {
+      for (let brandIndex = 0; brandIndex < BRANDS.length; brandIndex += 1) {
+        const payoutBrand = BRANDS[brandIndex];
         const reference = parseReference(dateIso, payoutBrand);
         const { start, end } = weekWindow(
           reference,
           payoutBrand.week_start,
           payoutBrand.timezone
         );
-        embeds.push(...await buildFinalPayEmbeds(payoutBrand, start, end));
-      }
+        const embeds = await buildFinalPayEmbeds(payoutBrand, start, end);
+        const components = await buildPaidChecklistComponents(
+          payoutBrand,
+          brandIndex,
+          start,
+          end
+        );
+        const payload = { embeds: embeds.slice(0, 10), components };
 
-      // Keep every business separate while sending all reports from one command.
-      await interaction.editReply({ embeds: embeds.slice(0, 10) });
-      for (let index = 10; index < embeds.length; index += 10) {
-        await interaction.followUp({ embeds: embeds.slice(index, index + 10) });
+        if (!sentFirstBusiness) {
+          await interaction.editReply(payload);
+          sentFirstBusiness = true;
+        } else {
+          await interaction.followUp(payload);
+        }
+        for (let index = 10; index < embeds.length; index += 10) {
+          await interaction.followUp({ embeds: embeds.slice(index, index + 10) });
+        }
       }
       return;
     }
@@ -958,5 +1109,6 @@ client.on('messageCreate', async message => {
 });
 
 client.login(process.env.BOT_TOKEN);
+
 
 
