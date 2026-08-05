@@ -784,26 +784,29 @@ async function reimbursementItemPanel(brand, brandIndex, draft = {}) {
       default: draft.itemIndex === index,
     })));
 
-  const amounts = [...new Set(items.map(item => item.price))]
-    .filter(amount => Number.isFinite(amount) && amount > 0)
-    .sort((a, b) => a - b)
-    .slice(0, 25);
-  const amountMenu = new StringSelectMenuBuilder()
-    .setCustomId(`reimbursement-amount:${brandIndex}`)
-    .setPlaceholder('Select the reimbursement amount…')
-    .addOptions(amounts.map(amount => ({
-      label: fmt(amount).slice(0, 100),
-      description: 'Configured reimbursement amount',
-      value: String(amount),
-      default: draft.amount === amount,
-    })));
+  const maxQuantity = Math.min(
+    25,
+    Math.max(1, Number(brand.reimbursement_max_quantity) || 25)
+  );
+  const quantityMenu = new StringSelectMenuBuilder()
+    .setCustomId(`reimbursement-quantity:${brandIndex}`)
+    .setPlaceholder('Select how many items…')
+    .addOptions(Array.from({ length: maxQuantity }, (_, index) => {
+      const quantity = index + 1;
+      return {
+      label: `${quantity} item${quantity === 1 ? '' : 's'}`,
+      description: 'Quantity being reimbursed',
+      value: String(quantity),
+      default: draft.quantity === quantity,
+      };
+    }));
   const controls = [
     new ButtonBuilder()
       .setCustomId(`reimbursement-submit:${brandIndex}`)
       .setLabel('Submit Reimbursement')
       .setEmoji('🧾')
       .setStyle(ButtonStyle.Primary)
-      .setDisabled(draft.itemIndex === undefined || draft.amount === undefined),
+      .setDisabled(draft.itemIndex === undefined || draft.quantity === undefined),
     new ButtonBuilder()
       .setCustomId('reimbursement-cancel')
       .setLabel('Cancel')
@@ -821,10 +824,10 @@ async function reimbursementItemPanel(brand, brandIndex, draft = {}) {
   return {
     content:
       `### 🧾 ${brand.name} Reimbursement\n` +
-      'Choose the item and amount, then submit.',
+      'Choose the item and quantity. The total is calculated automatically.',
     components: [
       new ActionRowBuilder().addComponents(itemMenu),
-      new ActionRowBuilder().addComponents(amountMenu),
+      new ActionRowBuilder().addComponents(quantityMenu),
       new ActionRowBuilder().addComponents(...controls),
     ],
   };
@@ -934,13 +937,13 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('reimbursement-amount:')) {
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('reimbursement-quantity:')) {
     const brandIndex = Number(interaction.customId.split(':')[1]);
     const brand = BRANDS[brandIndex];
     if (!brand) return;
     const key = reimbursementDraftKey(interaction.user.id, brandIndex);
     const draft = reimbursementDrafts.get(key) || {};
-    draft.amount = Number(interaction.values[0]);
+    draft.quantity = Number(interaction.values[0]);
     reimbursementDrafts.set(key, draft);
     await interaction.update(await reimbursementItemPanel(brand, brandIndex, draft));
     return;
@@ -955,12 +958,13 @@ client.on('interactionCreate', async interaction => {
     await interaction.deferUpdate();
 
     try {
-      if (!draft || draft.itemIndex === undefined || draft.amount === undefined) {
-        throw new Error('Select both an item and an amount');
+      if (!draft || draft.itemIndex === undefined || draft.quantity === undefined) {
+        throw new Error('Select both an item and a quantity');
       }
       const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
       const item = items[draft.itemIndex];
       if (!item) throw new Error('That reimbursement item is no longer available');
+      const amount = item.price * draft.quantity;
 
       const timestamp = dayjs().tz(brand.timezone);
       const employee =
@@ -976,9 +980,9 @@ client.on('interactionCreate', async interaction => {
         logged_by_id: interaction.user.id,
         employee,
         item: item.name,
-        quantity: 1,
-        unit_price: draft.amount,
-        amount: draft.amount,
+        quantity: draft.quantity,
+        unit_price: item.price,
+        amount,
         notes: '',
         status: 'UNPAID',
         paid_by: '',
@@ -995,8 +999,10 @@ client.on('interactionCreate', async interaction => {
         .setTitle(`🧾 ${brand.name} Reimbursement`)
         .addFields(
           { name: 'Employee', value: employee, inline: true },
-          { name: 'Total', value: `**${fmt(draft.amount)}**`, inline: true },
+          { name: 'Total', value: `**${fmt(amount)}**`, inline: true },
           { name: 'Item', value: item.name, inline: true },
+          { name: 'Quantity', value: String(draft.quantity), inline: true },
+          { name: 'Unit Price', value: fmt(item.price), inline: true },
           { name: 'Logged By', value: `<@${interaction.user.id}>`, inline: true },
           { name: 'Status', value: '🔴 **UNPAID**', inline: false }
         )
@@ -1014,7 +1020,9 @@ client.on('interactionCreate', async interaction => {
 
       reimbursementDrafts.delete(key);
       await interaction.editReply({
-        content: `Saved **${item.name}** for **${fmt(draft.amount)}** and posted it publicly.`,
+        content:
+          `Saved **${draft.quantity} x ${item.name}** for **${fmt(amount)}** ` +
+          'and posted it publicly.',
         components: [],
       });
     } catch (error) {
