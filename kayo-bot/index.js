@@ -254,7 +254,7 @@ class SheetStore {
   async payrollStatusSheet(brand) {
     await this.init();
     const title = safeSheetTitle(`${brand.name}__Payroll_Status`);
-    const headers = ['week_start', 'brand', 'employee', 'employee_key', 'paycheck', 'paid_by', 'paid_at'];
+    const headers = ['week_start', 'brand', 'employee', 'employee_key', 'paycheck', 'status', 'changed_by', 'changed_at'];
     let sheet = this.doc.sheetsByTitle[title];
     if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
     else {
@@ -269,11 +269,16 @@ class SheetStore {
     const sheet = await this.payrollStatusSheet(brand);
     const rows = await sheet.getRows();
     const wantedWeek = weekStart.format('YYYY-MM-DD');
-    return new Set(rows.flatMap(row =>
-      String(row.get('week_start')) === wantedWeek
-        ? [String(row.get('employee_key') || '').trim().toLowerCase()]
-        : []
-    ));
+    const paid = new Set();
+    for (const row of rows) {
+      if (String(row.get('week_start')) !== wantedWeek) continue;
+      const key = String(row.get('employee_key') || '').trim().toLowerCase();
+      if (!key) continue;
+      const status = String(row.get('status') || 'paid').trim().toLowerCase();
+      if (status === 'unpaid') paid.delete(key);
+      else paid.add(key);
+    }
+    return paid;
   }
 }
 
@@ -312,12 +317,6 @@ const fmt = value => new Intl.NumberFormat('en-US', {
 
 function findBrand(name) {
   return BRANDS.find(brand => brand.name.toLowerCase() === String(name || '').toLowerCase());
-}
-
-function parseReference(dateIso, brand) {
-  const reference = dateIso ? dayjs.tz(dateIso, brand.timezone) : dayjs().tz(brand.timezone);
-  if (!reference.isValid()) throw new Error('week_start_iso must be a valid ISO date');
-  return reference;
 }
 
 function limitEmbedText(lines, limit = 1024) {
@@ -451,16 +450,16 @@ async function buildPaidChecklistComponents(brand, brandIndex, start, end) {
   const rows = await storeFor(brand.sheet_id).fetchRange(brand, start.valueOf(), end.valueOf());
   const employees = groupPayoutsByEmployee(rows, commissionRateFor(brand), paycheckRateFor(brand));
   const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
-  const unpaid = employees.filter(item => !paidKeys.has(employeeKey(item.employee))).slice(0, 25);
-  if (!unpaid.length) return [];
+  const visibleEmployees = employees.slice(0, 25);
+  if (!visibleEmployees.length) return [];
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`mark-paid-employees:${brandIndex}:${start.format('YYYY-MM-DD')}`)
-    .setPlaceholder('Managers: select employees to mark paid')
+    .setPlaceholder('Managers: select employees to toggle Paid / Unpaid')
     .setMinValues(1)
-    .setMaxValues(unpaid.length)
-    .addOptions(unpaid.map((item, index) => ({
-      label: item.employee.slice(0, 100),
+    .setMaxValues(visibleEmployees.length)
+    .addOptions(visibleEmployees.map((item, index) => ({
+      label: `${paidKeys.has(employeeKey(item.employee)) ? '[PAID]' : '[UNPAID]'} ${item.employee}`.slice(0, 100),
       description: `Paycheck ${fmt(item.paycheck)}`.slice(0, 100),
       value: String(index),
     })));
@@ -480,16 +479,14 @@ const commands = [
   {
     name: 'payout',
     description: 'Show weekly payout totals for all brands',
-    options: [
-      { name: 'week_start_iso', description: 'Any ISO date in the week', type: 3 },
-    ],
   },
   {
     name: 'finalpay',
     description: 'Show final payouts for every business for a week',
-    options: [
-      { name: 'week_start_iso', description: 'Any ISO date in the week', type: 3 },
-    ],
+  },
+  {
+    name: 'lastweek',
+    description: 'Show payout and final-pay reports for the previous week',
   },
   {
     name: 'payout-employee',
@@ -497,7 +494,6 @@ const commands = [
     options: [
       { name: 'brand', description: 'Brand name', type: 3, required: true },
       { name: 'employee', description: 'Employee (matches invoiced_by)', type: 3, required: true },
-      { name: 'week_start_iso', description: 'Any ISO date in the week', type: 3 },
     ],
   },
   {
@@ -875,15 +871,17 @@ client.on('interactionCreate', async interaction => {
     const rows = await storeFor(brand.sheet_id).fetchRange(brand, start.valueOf(), end.valueOf());
     const employees = groupPayoutsByEmployee(rows, commissionRateFor(brand), paycheckRateFor(brand));
     const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
-    const unpaid = employees.filter(item => !paidKeys.has(employeeKey(item.employee))).slice(0, 25);
-    const selected = interaction.values.map(value => unpaid[Number(value)]).filter(Boolean);
+    const visibleEmployees = employees.slice(0, 25);
+    const selected = interaction.values.map(value => visibleEmployees[Number(value)]).filter(Boolean);
     const sheet = await storeFor(brand.sheet_id).payrollStatusSheet(brand);
-    const paidAt = new Date().toISOString();
+    const changedAt = new Date().toISOString();
     for (const item of selected) {
+      const key = employeeKey(item.employee);
+      const nextStatus = paidKeys.has(key) ? 'unpaid' : 'paid';
       await sheet.addRow({
         week_start: start.format('YYYY-MM-DD'), brand: brand.name,
-        employee: item.employee, employee_key: employeeKey(item.employee),
-        paycheck: item.paycheck, paid_by: interaction.user.id, paid_at: paidAt,
+        employee: item.employee, employee_key: key, paycheck: item.paycheck,
+        status: nextStatus, changed_by: interaction.user.id, changed_at: changedAt,
       });
     }
     const embeds = await buildFinalPayEmbeds(brand, start, end);
@@ -898,7 +896,7 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (!interaction.isChatInputCommand()) return;
-  if (!['payout', 'finalpay', 'payout-employee', 'reimbursement', 'reimbursement-items', 'raffle'].includes(interaction.commandName)) return;
+  if (!['payout', 'finalpay', 'lastweek', 'payout-employee', 'reimbursement', 'reimbursement-items', 'raffle'].includes(interaction.commandName)) return;
 
   const ephemeral = ['payout-employee', 'reimbursement', 'reimbursement-items']
     .includes(interaction.commandName);
@@ -939,11 +937,10 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'payout') {
-      const dateIso = interaction.options.getString('week_start_iso');
       const embeds = [];
 
       for (const payoutBrand of BRANDS) {
-        const reference = parseReference(dateIso, payoutBrand);
+        const reference = dayjs().tz(payoutBrand.timezone);
         const { start, end } = weekWindow(
           reference,
           payoutBrand.week_start,
@@ -966,12 +963,11 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'finalpay') {
-      const dateIso = interaction.options.getString('week_start_iso');
       let sentFirstBusiness = false;
 
       for (let brandIndex = 0; brandIndex < BRANDS.length; brandIndex += 1) {
         const payoutBrand = BRANDS[brandIndex];
-        const reference = parseReference(dateIso, payoutBrand);
+        const reference = dayjs().tz(payoutBrand.timezone);
         const { start, end } = weekWindow(
           reference,
           payoutBrand.week_start,
@@ -986,6 +982,39 @@ client.on('interactionCreate', async interaction => {
         );
         const payload = { embeds: embeds.slice(0, 10), components };
 
+        if (!sentFirstBusiness) {
+          await interaction.editReply(payload);
+          sentFirstBusiness = true;
+        } else {
+          await interaction.followUp(payload);
+        }
+        for (let index = 10; index < embeds.length; index += 10) {
+          await interaction.followUp({ embeds: embeds.slice(index, index + 10) });
+        }
+      }
+      return;
+    }
+
+    if (interaction.commandName === 'lastweek') {
+      let sentFirstBusiness = false;
+      for (let brandIndex = 0; brandIndex < BRANDS.length; brandIndex += 1) {
+        const payoutBrand = BRANDS[brandIndex];
+        const reference = dayjs().tz(payoutBrand.timezone).subtract(7, 'day');
+        const { start, end } = weekWindow(
+          reference,
+          payoutBrand.week_start,
+          payoutBrand.timezone
+        );
+        const { embed: payoutEmbed } = await buildWeeklySummary(payoutBrand, start, end);
+        const finalPayEmbeds = await buildFinalPayEmbeds(payoutBrand, start, end);
+        const embeds = [payoutEmbed, ...finalPayEmbeds];
+        const components = await buildPaidChecklistComponents(
+          payoutBrand,
+          brandIndex,
+          start,
+          end
+        );
+        const payload = { embeds: embeds.slice(0, 10), components };
         if (!sentFirstBusiness) {
           await interaction.editReply(payload);
           sentFirstBusiness = true;
@@ -1031,10 +1060,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const reference = parseReference(
-      interaction.options.getString('week_start_iso'),
-      brand
-    );
+    const reference = dayjs().tz(brand.timezone);
     const { start, end } = weekWindow(reference, brand.week_start, brand.timezone);
 
     const requestedEmployee = interaction.options.getString('employee', true).trim();
