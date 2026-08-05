@@ -8,7 +8,10 @@ import {
   EmbedBuilder,
   MessageFlags,
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ModalBuilder,
+  PermissionFlagsBits,
   StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -211,16 +214,41 @@ class SheetStore {
   async reimbursementSheet(brand) {
     await this.init();
     const title = safeSheetTitle(`${brand.name}__Reimbursements`);
-    const headers = ['ts_iso', 'ts_epoch', 'brand', 'logged_by', 'logged_by_id', 'employee', 'amount', 'reason', 'notes'];
+    const headers = ['ts_iso', 'ts_epoch', 'brand', 'logged_by', 'logged_by_id', 'employee', 'item', 'quantity', 'unit_price', 'amount', 'notes'];
 
     let sheet = this.doc.sheetsByTitle[title];
     if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
     else {
       await sheet.loadHeaderRow(1);
       const missing = headers.filter(header => !sheet.headerValues.includes(header));
-      if (missing.length) throw new Error(`${title} is missing columns: ${missing.join(', ')}`);
+      if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
     }
     return sheet;
+  }
+
+  async reimbursementItemsSheet(brand) {
+    await this.init();
+    const title = safeSheetTitle(`${brand.name}__Reimbursement_Items`);
+    const headers = ['item_name', 'unit_price', 'active', 'added_by', 'added_at'];
+    let sheet = this.doc.sheetsByTitle[title];
+    if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
+    else {
+      await sheet.loadHeaderRow(1);
+      const missing = headers.filter(header => !sheet.headerValues.includes(header));
+      if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
+    }
+    return sheet;
+  }
+
+  async reimbursementItems(brand) {
+    const sheet = await this.reimbursementItemsSheet(brand);
+    const rows = await sheet.getRows();
+    return rows.flatMap(row => {
+      if (String(row.get('active') || 'true').toLowerCase() === 'false') return [];
+      const name = String(row.get('item_name') || '').trim();
+      const price = Number(String(row.get('unit_price') || '').replace(/[^0-9.-]/g, ''));
+      return name && Number.isFinite(price) ? [{ name, price }] : [];
+    });
   }
 }
 
@@ -432,6 +460,11 @@ const commands = [
     description: 'Open the reimbursement logging form',
   },
   {
+    name: 'reimbursement-items',
+    description: 'Manage reimbursement items and prices',
+    default_member_permissions: String(PermissionFlagsBits.ManageGuild),
+  },
+  {
     name: 'raffle',
     description: 'Log raffle tickets',
     options: [
@@ -600,13 +633,43 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
+    if (!items.length) {
+      await interaction.update({
+        content: `No reimbursement items are configured for **${brand.name}**. An administrator can add them with \`/reimbursement-items\`.`,
+        components: [],
+      });
+      return;
+    }
+    const itemMenu = new StringSelectMenuBuilder()
+      .setCustomId(`reimbursement-item:${brandIndex}`)
+      .setPlaceholder('Choose an item')
+      .addOptions(items.slice(0, 25).map((item, index) => ({
+        label: item.name.slice(0, 100),
+        description: `${fmt(item.price)} each`.slice(0, 100),
+        value: String(index),
+      })));
+    await interaction.update({
+      content: `**${brand.name} Reimbursement**\nChoose an item.`,
+      components: [new ActionRowBuilder().addComponents(itemMenu)],
+    });
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('reimbursement-item:')) {
+    const brandIndex = Number(interaction.customId.split(':')[1]);
+    const itemIndex = Number(interaction.values[0]);
+    const brand = BRANDS[brandIndex];
+    if (!brand) return;
+    const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
+    const item = items[itemIndex];
+    if (!item) return;
     const modal = new ModalBuilder()
-      .setCustomId(`reimbursement-modal:${brandIndex}`)
+      .setCustomId(`reimbursement-modal:${brandIndex}:${itemIndex}`)
       .setTitle(`${brand.name} Reimbursement`)
       .addComponents(
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('employee').setLabel('Employee being reimbursed').setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('amount').setLabel('Reimbursement amount').setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel(`Quantity of ${item.name}`.slice(0, 45)).setStyle(TextInputStyle.Short).setRequired(true)),
         new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('notes').setLabel('Additional notes').setStyle(TextInputStyle.Paragraph).setRequired(false))
       );
     await interaction.showModal(modal);
@@ -614,7 +677,7 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith('reimbursement-modal:')) {
-    const [, brandIndexText] = interaction.customId.split(':');
+    const [, brandIndexText, itemIndexText] = interaction.customId.split(':');
     const brand = BRANDS[Number(brandIndexText)];
     if (!brand) return;
 
@@ -624,16 +687,20 @@ client.on('interactionCreate', async interaction => {
       const loggedBy = interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
       const sheet = await storeFor(brand.sheet_id).reimbursementSheet(brand);
       const notes = interaction.fields.getTextInputValue('notes').trim();
-      const amountText = interaction.fields.getTextInputValue('amount');
-      const amount = Number(amountText.replace(/[^0-9.-]/g, ''));
-      if (!Number.isFinite(amount) || amount < 0) throw new Error('Enter a valid reimbursement amount');
+      const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
+      const item = items[Number(itemIndexText)];
+      if (!item) throw new Error('That reimbursement item is no longer available');
+      const quantity = Number(interaction.fields.getTextInputValue('quantity'));
+      if (!Number.isInteger(quantity) || quantity < 1) throw new Error('Quantity must be a whole number of at least 1');
+      const amount = item.price * quantity;
       await sheet.addRow({
         ts_iso: timestamp.toISOString(), ts_epoch: timestamp.valueOf(), brand: brand.name,
         logged_by: loggedBy, logged_by_id: interaction.user.id,
-        employee: interaction.fields.getTextInputValue('employee').trim(), amount,
-        reason: interaction.fields.getTextInputValue('reason').trim(), notes,
+        employee: interaction.fields.getTextInputValue('employee').trim(),
+        item: item.name, quantity, unit_price: item.price, amount,
+        notes,
       });
-      await interaction.editReply(`Reimbursement of **${fmt(amount)}** saved for **${brand.name}**.`);
+      await interaction.editReply(`Saved **${quantity} x ${item.name}** for **${fmt(amount)}** under **${brand.name}**.`);
     } catch (error) {
       console.error('Business log error:', error);
       await interaction.editReply(`Could not save entry: ${error.message}`);
@@ -641,10 +708,67 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
-  if (!interaction.isChatInputCommand()) return;
-  if (!['payout', 'finalpay', 'payout-employee', 'reimbursement', 'raffle'].includes(interaction.commandName)) return;
+  if (interaction.isStringSelectMenu() && interaction.customId === 'reimbursement-admin-brand') {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      await interaction.update({ content: 'You need the Manage Server permission.', components: [] });
+      return;
+    }
+    const brandIndex = Number(interaction.values[0]);
+    const brand = BRANDS[brandIndex];
+    if (!brand) return;
+    const button = new ButtonBuilder()
+      .setCustomId(`reimbursement-add:${brandIndex}`)
+      .setLabel('Add Reimbursement Item')
+      .setStyle(ButtonStyle.Primary);
+    await interaction.update({
+      content: `Manage reimbursement items for **${brand.name}**.`,
+      components: [new ActionRowBuilder().addComponents(button)],
+    });
+    return;
+  }
 
-  const ephemeral = interaction.commandName === 'payout-employee';
+  if (interaction.isButton() && interaction.customId.startsWith('reimbursement-add:')) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return;
+    const brandIndex = Number(interaction.customId.split(':')[1]);
+    const brand = BRANDS[brandIndex];
+    if (!brand) return;
+    const modal = new ModalBuilder()
+      .setCustomId(`reimbursement-add-modal:${brandIndex}`)
+      .setTitle(`Add ${brand.name} Item`)
+      .addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('item_name').setLabel('Item name').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('unit_price').setLabel('Reimbursement price per item').setStyle(TextInputStyle.Short).setRequired(true))
+      );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('reimbursement-add-modal:')) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return;
+    const brand = BRANDS[Number(interaction.customId.split(':')[1])];
+    if (!brand) return;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const itemName = interaction.fields.getTextInputValue('item_name').trim();
+      const price = Number(interaction.fields.getTextInputValue('unit_price').replace(/[^0-9.-]/g, ''));
+      if (!itemName || !Number.isFinite(price) || price < 0) throw new Error('Enter a valid item name and price');
+      const sheet = await storeFor(brand.sheet_id).reimbursementItemsSheet(brand);
+      await sheet.addRow({
+        item_name: itemName, unit_price: price, active: 'true',
+        added_by: interaction.user.id, added_at: new Date().toISOString(),
+      });
+      await interaction.editReply(`Added **${itemName}** at **${fmt(price)} each** for **${brand.name}**.`);
+    } catch (error) {
+      await interaction.editReply(`Could not add item: ${error.message}`);
+    }
+    return;
+  }
+
+  if (!interaction.isChatInputCommand()) return;
+  if (!['payout', 'finalpay', 'payout-employee', 'reimbursement', 'reimbursement-items', 'raffle'].includes(interaction.commandName)) return;
+
+  const ephemeral = ['payout-employee', 'reimbursement', 'reimbursement-items']
+    .includes(interaction.commandName);
   try {
     await interaction.deferReply({ flags: ephemeral ? MessageFlags.Ephemeral : undefined });
 
@@ -658,6 +782,24 @@ client.on('interactionCreate', async interaction => {
         })));
       await interaction.editReply({
         content: '**Log a Reimbursement**\nChoose the business.',
+        components: [new ActionRowBuilder().addComponents(brandMenu)],
+      });
+      return;
+    }
+
+    if (interaction.commandName === 'reimbursement-items') {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+        await interaction.editReply('You need the Manage Server permission.');
+        return;
+      }
+      const brandMenu = new StringSelectMenuBuilder()
+        .setCustomId('reimbursement-admin-brand')
+        .setPlaceholder('Choose a business')
+        .addOptions(BRANDS.slice(0, 25).map((brand, index) => ({
+          label: brand.name.slice(0, 100), value: String(index),
+        })));
+      await interaction.editReply({
+        content: '**Reimbursement Item Manager**\nChoose the business.',
         components: [new ActionRowBuilder().addComponents(brandMenu)],
       });
       return;
@@ -822,3 +964,4 @@ client.on('messageCreate', async message => {
 });
 
 client.login(process.env.BOT_TOKEN);
+
