@@ -269,9 +269,8 @@ const client = new Client({
 const commands = [
   {
     name: 'payout',
-    description: 'Show weekly payout totals',
+    description: 'Show weekly payout totals for all brands',
     options: [
-      { name: 'brand', description: 'Brand name', type: 3, required: true },
       { name: 'week_start_iso', description: 'Any ISO date in the week', type: 3 },
     ],
   },
@@ -385,6 +384,33 @@ client.on('interactionCreate', async interaction => {
   try {
     await interaction.deferReply({ flags: ephemeral ? MessageFlags.Ephemeral : undefined });
 
+    if (interaction.commandName === 'payout') {
+      const dateIso = interaction.options.getString('week_start_iso');
+      const embeds = [];
+
+      for (const payoutBrand of BRANDS) {
+        const reference = parseReference(dateIso, payoutBrand);
+        const { start, end } = weekWindow(
+          reference,
+          payoutBrand.week_start,
+          payoutBrand.timezone
+        );
+        const { embed } = await buildWeeklySummary(payoutBrand, start, end);
+        embeds.push(embed);
+      }
+
+      // Discord permits at most 10 embeds per message.
+      const chunks = [];
+      for (let index = 0; index < embeds.length; index += 10) {
+        chunks.push(embeds.slice(index, index + 10));
+      }
+      await interaction.editReply({ embeds: chunks.shift() || [] });
+      for (const chunk of chunks) {
+        await interaction.followUp({ embeds: chunk });
+      }
+      return;
+    }
+
     const brandName = interaction.options.getString('brand');
     const brand = findBrand(brandName);
     if (!brand) {
@@ -422,12 +448,6 @@ client.on('interactionCreate', async interaction => {
       brand
     );
     const { start, end } = weekWindow(reference, brand.week_start, brand.timezone);
-
-    if (interaction.commandName === 'payout') {
-      const { embed } = await buildWeeklySummary(brand, start, end);
-      await interaction.editReply({ embeds: [embed] });
-      return;
-    }
 
     const requestedEmployee = interaction.options.getString('employee', true).trim();
     const rows = await storeFor(brand.sheet_id).fetchRange(
