@@ -410,7 +410,7 @@ async function buildFinalPayEmbeds(brand, start, end) {
   return pages.map((pageEmployees, pageIndex) => {
     const embed = new EmbedBuilder()
       .setColor(employees.length > 0 && paidCount === employees.length ? 0x22c55e : (brand.embed_color || 0x7d3fd6))
-      .setTitle(`${brand.name}  •  Payroll Overview`)
+      .setTitle(`${brand.name} • Payroll Overview`)
       .setDescription(
         `**${start.format('MMM D')} — ${endInclusive.format('MMM D, YYYY')}**\n` +
         `> **${paidCount}/${employees.length} paid**  •  Saturday–Friday\n` +
@@ -430,17 +430,16 @@ async function buildFinalPayEmbeds(brand, start, end) {
     if (!pageEmployees.length) {
       embed.addFields({ name: 'Employees', value: '_No paid sales were recorded._' });
     } else {
-      embed.addFields(pageEmployees.map((item, employeeIndex) => {
-        const overallIndex = pageIndex * 18 + employeeIndex + 1;
+      embed.addFields(pageEmployees.map(item => {
         const salesLabel = item.sales === 1 ? 'sale' : 'sales';
         const isPaid = paidKeys.has(employeeKey(item.employee));
         return {
-          name: `${isPaid ? '🟢' : '⚪'} ${overallIndex}. ${item.employee}`.slice(0, 256),
+          name: `${isPaid ? '🟢' : '⚪'} ${item.employee}`.slice(0, 256),
           value:
-            `${isPaid ? '🟢 **PAID ✓**' : '**UNPAID**'}\n` +
-            `Sales · ${fmt(item.gross)} · ${item.sales} ${salesLabel}\n` +
-            `Commission · ${fmt(item.commission)}\n` +
-            `**Paycheck · ${fmt(item.paycheck)}**`,
+            `${isPaid ? '**PAID ✓**' : '**UNPAID**'}\n` +
+            `Sales · **${fmt(item.gross)}** · ${item.sales} ${salesLabel}\n` +
+            `Commission · **${fmt(item.commission)}**\n` +
+            `Paycheck · **${fmt(item.paycheck)}**`,
           inline: true,
         };
       }));
