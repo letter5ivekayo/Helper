@@ -366,57 +366,51 @@ async function buildFinalPayEmbeds(brand, start, end) {
   const commissionRate = commissionRateFor(brand);
   const paycheckRate = paycheckRateFor(brand);
   const employees = groupPayoutsByEmployee(rows, commissionRate, paycheckRate);
-  const lines = employees.map((item, index) => {
-    const salesLabel = item.sales === 1 ? 'sale' : 'sales';
-    return `**${index + 1}. ${item.employee}**\n` +
-      `Total Sales: **${fmt(item.gross)}** (${item.sales} ${salesLabel} added together)\n` +
-      `Commission (${percentageLabel(commissionRate)}): **${fmt(item.commission)}** | ` +
-      `Paycheck (${percentageLabel(paycheckRate)} after commission): **${fmt(item.paycheck)}**`;
-  });
-
   const pages = [];
-  let page = [];
-  let length = 0;
-  for (const line of lines) {
-    if (page.length && length + line.length + 1 > 3500) {
-      pages.push(page);
-      page = [];
-      length = 0;
-    }
-    page.push(line);
-    length += line.length + 1;
+  for (let index = 0; index < employees.length; index += 18) {
+    pages.push(employees.slice(index, index + 18));
   }
-  if (page.length || pages.length === 0) pages.push(page);
+  if (!pages.length) pages.push([]);
 
   const grossTotal = employees.reduce((sum, item) => sum + item.gross, 0);
   const commissionTotal = employees.reduce((sum, item) => sum + item.commission, 0);
   const paycheckTotal = employees.reduce((sum, item) => sum + item.paycheck, 0);
   const endInclusive = end.subtract(1, 'day');
 
-  return pages.map((pageLines, index) => {
+  return pages.map((pageEmployees, pageIndex) => {
     const embed = new EmbedBuilder()
       .setColor(brand.embed_color || 0x5865f2)
-      .setTitle(`${brand.name} - Final Pay${pages.length > 1 ? ` (${index + 1}/${pages.length})` : ''}`)
+      .setTitle(`${brand.name} | Final Payroll${pages.length > 1 ? ` | Page ${pageIndex + 1} of ${pages.length}` : ''}`)
       .setDescription(
-        `**${start.format('MMMM D')} - ${endInclusive.format('MMMM D, YYYY')}**\n` +
-        `Commission: **${percentageLabel(commissionRate)}** | ` +
-        `Paycheck after commission: **${percentageLabel(paycheckRate)}**`
+        `**Pay period:** ${start.format('MMM D')} - ${endInclusive.format('MMM D, YYYY')}\n` +
+        `**Formula:** Sales x ${percentageLabel(commissionRate)} commission x ` +
+        `${percentageLabel(paycheckRate)} paycheck rate`
       )
-      .addFields({
-        name: 'Final Payouts by Employee',
-        value: pageLines.join('\n') || '_no paid invoices_',
-      })
+      .addFields(
+        { name: 'Total Sales', value: fmt(grossTotal), inline: true },
+        { name: 'Total Commission', value: fmt(commissionTotal), inline: true },
+        { name: 'Total Payroll', value: `**${fmt(paycheckTotal)}**`, inline: true }
+      )
       .setFooter({
-        text: `${employees.length} employee${employees.length === 1 ? '' : 's'} - ${rows.length} paid invoice${rows.length === 1 ? '' : 's'}`,
+        text: `${employees.length} employees | ${rows.length} paid sales | Saturday-Friday`,
       })
       .setTimestamp(new Date());
 
-    if (index === pages.length - 1) {
-      embed.addFields(
-        { name: 'Total Sales', value: `**${fmt(grossTotal)}**`, inline: true },
-        { name: 'Total Commission', value: `**${fmt(commissionTotal)}**`, inline: true },
-        { name: 'Total Paychecks', value: `**${fmt(paycheckTotal)}**`, inline: true }
-      );
+    if (!pageEmployees.length) {
+      embed.addFields({ name: 'Employees', value: '_No paid sales were recorded._' });
+    } else {
+      embed.addFields(pageEmployees.map((item, employeeIndex) => {
+        const overallIndex = pageIndex * 18 + employeeIndex + 1;
+        const salesLabel = item.sales === 1 ? 'sale' : 'sales';
+        return {
+          name: `${overallIndex}. ${item.employee}`.slice(0, 256),
+          value:
+            `Sales: **${fmt(item.gross)}** (${item.sales} ${salesLabel})\n` +
+            `Commission: ${fmt(item.commission)}\n` +
+            `Paycheck: **${fmt(item.paycheck)}**`,
+          inline: true,
+        };
+      }));
     }
     return embed;
   });
@@ -964,4 +958,5 @@ client.on('messageCreate', async message => {
 });
 
 client.login(process.env.BOT_TOKEN);
+
 
