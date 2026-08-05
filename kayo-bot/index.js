@@ -406,25 +406,21 @@ async function buildFinalPayEmbeds(brand, start, end) {
   const paycheckTotal = employees.reduce((sum, item) => sum + item.paycheck, 0);
   const paidCount = employees.filter(item => paidKeys.has(employeeKey(item.employee))).length;
   const endInclusive = end.subtract(1, 'day');
-  const summaryValues = [fmt(grossTotal), fmt(commissionTotal), fmt(paycheckTotal)];
-  const summaryWidth = Math.max(...summaryValues.map(value => value.length));
-  const moneySummary = [
-    `TOTAL SALES   ${summaryValues[0].padStart(summaryWidth)}`,
-    `COMMISSION    ${summaryValues[1].padStart(summaryWidth)}`,
-    `TOTAL PAYROLL ${summaryValues[2].padStart(summaryWidth)}`,
-  ].join('\n');
 
   return pages.map((pageEmployees, pageIndex) => {
     const embed = new EmbedBuilder()
       .setColor(employees.length > 0 && paidCount === employees.length ? 0x22c55e : (brand.embed_color || 0x7d3fd6))
-      .setTitle(`💼 ${brand.name} Payroll`)
+      .setTitle(`${brand.name}  •  Payroll Overview`)
       .setDescription(
-        `**${start.format('MMMM D')} — ${endInclusive.format('MMMM D, YYYY')}**\n` +
-        `${paidCount === employees.length && employees.length ? '✅' : '◻️'} ` +
-        `**${paidCount} of ${employees.length} employees paid**\n\n` +
-        `\`\`\`text\n${moneySummary}\n\`\`\`\n` +
-        `Commission ${percentageLabel(commissionRate)}  •  ` +
-        `Paycheck ${percentageLabel(paycheckRate)} of commission`
+        `**${start.format('MMM D')} — ${endInclusive.format('MMM D, YYYY')}**\n` +
+        `> **${paidCount}/${employees.length} paid**  •  Saturday–Friday\n` +
+        `> ${percentageLabel(commissionRate)} commission  →  ` +
+        `${percentageLabel(paycheckRate)} paycheck rate`
+      )
+      .addFields(
+        { name: '💰 SALES', value: `**${fmt(grossTotal)}**`, inline: true },
+        { name: '📈 COMMISSION', value: `**${fmt(commissionTotal)}**`, inline: true },
+        { name: '💵 PAYROLL', value: `**${fmt(paycheckTotal)}**`, inline: true }
       )
       .setFooter({
         text: `${employees.length} employees  •  ${rows.length} sales${pages.length > 1 ? `  •  Page ${pageIndex + 1}/${pages.length}` : ''}`,
@@ -435,14 +431,17 @@ async function buildFinalPayEmbeds(brand, start, end) {
       embed.addFields({ name: 'Employees', value: '_No paid sales were recorded._' });
     } else {
       embed.addFields(pageEmployees.map((item, employeeIndex) => {
+        const overallIndex = pageIndex * 18 + employeeIndex + 1;
         const salesLabel = item.sales === 1 ? 'sale' : 'sales';
         const isPaid = paidKeys.has(employeeKey(item.employee));
         return {
-          name: `${isPaid ? '✅' : '◻️'} ${item.employee}  •  ${fmt(item.paycheck)}`.slice(0, 256),
+          name: `${isPaid ? '🟢' : '⚪'} ${overallIndex}. ${item.employee}`.slice(0, 256),
           value:
-            `Sales **${fmt(item.gross)}**  •  ` +
-            `Commission **${fmt(item.commission)}**  •  ${item.sales} ${salesLabel}`,
-          inline: false,
+            `${isPaid ? '🟢 **PAID ✓**' : '**UNPAID**'}\n` +
+            `Sales · ${fmt(item.gross)} · ${item.sales} ${salesLabel}\n` +
+            `Commission · ${fmt(item.commission)}\n` +
+            `**Paycheck · ${fmt(item.paycheck)}**`,
+          inline: true,
         };
       }));
     }
@@ -454,20 +453,39 @@ async function buildPaidChecklistComponents(brand, brandIndex, start, end) {
   const rows = await storeFor(brand.sheet_id).fetchRange(brand, start.valueOf(), end.valueOf());
   const employees = groupPayoutsByEmployee(rows, commissionRateFor(brand), paycheckRateFor(brand));
   const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
-  const visibleEmployees = employees.slice(0, 25);
-  if (!visibleEmployees.length) return [];
+  const unpaid = employees.filter(item => !paidKeys.has(employeeKey(item.employee))).slice(0, 25);
+  const paid = employees.filter(item => paidKeys.has(employeeKey(item.employee))).slice(0, 25);
+  const components = [];
 
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`mark-paid-employees:${brandIndex}:${start.format('YYYY-MM-DD')}`)
-    .setPlaceholder('Update payment status…')
-    .setMinValues(1)
-    .setMaxValues(visibleEmployees.length)
-    .addOptions(visibleEmployees.map((item, index) => ({
-      label: `${paidKeys.has(employeeKey(item.employee)) ? '🟢 ✅ PAID' : '⚪ UNPAID'} | ${item.employee}`.slice(0, 100),
-      description: `Paycheck ${fmt(item.paycheck)}`.slice(0, 100),
-      value: String(index),
-    })));
-  return [new ActionRowBuilder().addComponents(menu)];
+  if (unpaid.length) {
+    const markPaidMenu = new StringSelectMenuBuilder()
+      .setCustomId(`payroll-set-paid:${brandIndex}:${start.format('YYYY-MM-DD')}`)
+      .setPlaceholder('✅ Mark employees as paid…')
+      .setMinValues(1)
+      .setMaxValues(unpaid.length)
+      .addOptions(unpaid.map((item, index) => ({
+        label: item.employee.slice(0, 100),
+        description: `Paycheck ${fmt(item.paycheck)}`.slice(0, 100),
+        value: String(index),
+      })));
+    components.push(new ActionRowBuilder().addComponents(markPaidMenu));
+  }
+
+  if (paid.length) {
+    const markUnpaidMenu = new StringSelectMenuBuilder()
+      .setCustomId(`payroll-set-unpaid:${brandIndex}:${start.format('YYYY-MM-DD')}`)
+      .setPlaceholder('↩ Unmark paid employees…')
+      .setMinValues(1)
+      .setMaxValues(paid.length)
+      .addOptions(paid.map((item, index) => ({
+        label: item.employee.slice(0, 100),
+        description: `Paid ${fmt(item.paycheck)}`.slice(0, 100),
+        value: String(index),
+      })));
+    components.push(new ActionRowBuilder().addComponents(markUnpaidMenu));
+  }
+
+  return components;
 }
 
 const client = new Client({
@@ -855,7 +873,11 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('mark-paid-employees:')) {
+  if (
+    interaction.isStringSelectMenu() &&
+    (interaction.customId.startsWith('payroll-set-paid:') ||
+      interaction.customId.startsWith('payroll-set-unpaid:'))
+  ) {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
       await interaction.reply({
         content: 'You need the Manage Server permission to mark payroll as paid.',
@@ -863,7 +885,7 @@ client.on('interactionCreate', async interaction => {
       });
       return;
     }
-    const [, brandIndexText, weekStartText] = interaction.customId.split(':');
+    const [action, brandIndexText, weekStartText] = interaction.customId.split(':');
     const brand = BRANDS[Number(brandIndexText)];
     if (!brand) return;
     await interaction.deferUpdate();
@@ -875,13 +897,18 @@ client.on('interactionCreate', async interaction => {
     const rows = await storeFor(brand.sheet_id).fetchRange(brand, start.valueOf(), end.valueOf());
     const employees = groupPayoutsByEmployee(rows, commissionRateFor(brand), paycheckRateFor(brand));
     const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
-    const visibleEmployees = employees.slice(0, 25);
-    const selected = interaction.values.map(value => visibleEmployees[Number(value)]).filter(Boolean);
+    const settingPaid = action === 'payroll-set-paid';
+    const availableEmployees = employees
+      .filter(item => paidKeys.has(employeeKey(item.employee)) !== settingPaid)
+      .slice(0, 25);
+    const selected = interaction.values
+      .map(value => availableEmployees[Number(value)])
+      .filter(Boolean);
     const sheet = await storeFor(brand.sheet_id).payrollStatusSheet(brand);
     const changedAt = new Date().toISOString();
     for (const item of selected) {
       const key = employeeKey(item.employee);
-      const nextStatus = paidKeys.has(key) ? 'unpaid' : 'paid';
+      const nextStatus = settingPaid ? 'paid' : 'unpaid';
       await sheet.addRow({
         week_start: start.format('YYYY-MM-DD'), brand: brand.name,
         employee: item.employee, employee_key: key, paycheck: item.paycheck,
