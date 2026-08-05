@@ -406,20 +406,25 @@ async function buildFinalPayEmbeds(brand, start, end) {
   const paycheckTotal = employees.reduce((sum, item) => sum + item.paycheck, 0);
   const paidCount = employees.filter(item => paidKeys.has(employeeKey(item.employee))).length;
   const endInclusive = end.subtract(1, 'day');
+  const summaryValues = [fmt(grossTotal), fmt(commissionTotal), fmt(paycheckTotal)];
+  const summaryWidth = Math.max(...summaryValues.map(value => value.length));
+  const moneySummary = [
+    `TOTAL SALES   ${summaryValues[0].padStart(summaryWidth)}`,
+    `COMMISSION    ${summaryValues[1].padStart(summaryWidth)}`,
+    `TOTAL PAYROLL ${summaryValues[2].padStart(summaryWidth)}`,
+  ].join('\n');
 
   return pages.map((pageEmployees, pageIndex) => {
     const embed = new EmbedBuilder()
       .setColor(employees.length > 0 && paidCount === employees.length ? 0x22c55e : (brand.embed_color || 0x7d3fd6))
-      .setTitle(`${brand.name}  •  Payroll Overview`)
+      .setTitle(`💼 ${brand.name} Payroll`)
       .setDescription(
-        `### ${start.format('MMM D')} — ${endInclusive.format('MMM D, YYYY')}\n` +
-        `> **${paidCount}/${employees.length} paid**  •  Saturday–Friday\n` +
-        `> ${percentageLabel(commissionRate)} commission  →  ${percentageLabel(paycheckRate)} paycheck rate`
-      )
-      .addFields(
-        { name: '💰 SALES', value: `### ${fmt(grossTotal)}`, inline: true },
-        { name: '📈 COMMISSION', value: `### ${fmt(commissionTotal)}`, inline: true },
-        { name: '💵 PAYROLL', value: `### ${fmt(paycheckTotal)}`, inline: true }
+        `**${start.format('MMMM D')} — ${endInclusive.format('MMMM D, YYYY')}**\n` +
+        `${paidCount === employees.length && employees.length ? '✅' : '◻️'} ` +
+        `**${paidCount} of ${employees.length} employees paid**\n\n` +
+        `\`\`\`text\n${moneySummary}\n\`\`\`\n` +
+        `Commission ${percentageLabel(commissionRate)}  •  ` +
+        `Paycheck ${percentageLabel(paycheckRate)} of commission`
       )
       .setFooter({
         text: `${employees.length} employees  •  ${rows.length} sales${pages.length > 1 ? `  •  Page ${pageIndex + 1}/${pages.length}` : ''}`,
@@ -430,17 +435,14 @@ async function buildFinalPayEmbeds(brand, start, end) {
       embed.addFields({ name: 'Employees', value: '_No paid sales were recorded._' });
     } else {
       embed.addFields(pageEmployees.map((item, employeeIndex) => {
-        const overallIndex = pageIndex * 18 + employeeIndex + 1;
         const salesLabel = item.sales === 1 ? 'sale' : 'sales';
         const isPaid = paidKeys.has(employeeKey(item.employee));
         return {
-          name: `${isPaid ? '🟢' : '⚪'}  ${overallIndex}. ${item.employee}`.slice(0, 256),
+          name: `${isPaid ? '✅' : '◻️'} ${item.employee}  •  ${fmt(item.paycheck)}`.slice(0, 256),
           value:
-            `**${isPaid ? 'PAID ✓' : 'UNPAID'}**\n` +
-            `Sales · ${fmt(item.gross)} · ${item.sales} ${salesLabel}\n` +
-            `Commission · ${fmt(item.commission)}\n` +
-            `**Paycheck · ${fmt(item.paycheck)}**`,
-          inline: true,
+            `Sales **${fmt(item.gross)}**  •  ` +
+            `Commission **${fmt(item.commission)}**  •  ${item.sales} ${salesLabel}`,
+          inline: false,
         };
       }));
     }
@@ -1137,4 +1139,5 @@ client.on('messageCreate', async message => {
 });
 
 client.login(process.env.BOT_TOKEN);
+
 
