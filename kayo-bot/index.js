@@ -320,7 +320,7 @@ async function registerCommands() {
   );
 }
 
-async function buildWeeklySummary(brand, start, end) {
+async function buildWeeklySummaryLegacy(brand, start, end) {
   const rows = await storeFor(brand.sheet_id).fetchRange(
     brand,
     start.valueOf(),
@@ -348,6 +348,57 @@ async function buildWeeklySummary(brand, start, end) {
       { name: 'Totals by Employee', value: limitEmbedText(lines) },
       { name: 'Grand Total', value: fmt(grand), inline: true }
     )
+    .setTimestamp(new Date());
+
+  return { embed, grand };
+}
+
+async function buildWeeklySummary(brand, start, end) {
+  const rows = await storeFor(brand.sheet_id).fetchRange(
+    brand,
+    start.valueOf(),
+    end.valueOf()
+  );
+
+  const byEmployee = new Map();
+  for (const row of rows) {
+    const employee = String(row.invoiced_by || 'UNKNOWN').trim() || 'UNKNOWN';
+    const current = byEmployee.get(employee) || { total: 0, sales: 0 };
+    current.total += row.amount;
+    current.sales += 1;
+    byEmployee.set(employee, current);
+  }
+
+  const sorted = [...byEmployee.entries()].sort(
+    (a, b) => b[1].total - a[1].total
+  );
+  const medals = ['🥇', '🥈', '🥉'];
+  const lines = sorted.slice(0, 20).map(([employee, stats], index) => {
+    const rank = medals[index] || `**${index + 1}.**`;
+    const salesLabel = stats.sales === 1 ? 'sale' : 'sales';
+    return `${rank} **${employee}** — ${fmt(stats.total)} · ${stats.sales} ${salesLabel}`;
+  });
+
+  const grand = rows.reduce((sum, row) => sum + row.amount, 0);
+  const averageSale = rows.length ? grand / rows.length : 0;
+  const endInclusive = end.subtract(1, 'day');
+
+  const embed = new EmbedBuilder()
+    .setColor(brand.embed_color || 0x5865f2)
+    .setTitle(`💰 ${brand.name} Weekly Payouts`)
+    .setDescription(
+      `**${start.format('MMMM D')} – ${endInclusive.format('MMMM D, YYYY')}**\n` +
+      `Saturday–Friday · ${brand.timezone}`
+    )
+    .addFields(
+      { name: '🏆 Payout Leaderboard', value: limitEmbedText(lines) },
+      { name: '💵 Grand Total', value: `**${fmt(grand)}**`, inline: true },
+      { name: '🧾 Sales', value: `**${rows.length.toLocaleString('en-US')}**`, inline: true },
+      { name: '📊 Average Sale', value: `**${fmt(averageSale)}**`, inline: true }
+    )
+    .setFooter({
+      text: `${sorted.length} employee${sorted.length === 1 ? '' : 's'} · New week starts Saturday`,
+    })
     .setTimestamp(new Date());
 
   return { embed, grand };
