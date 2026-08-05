@@ -532,10 +532,16 @@ async function postWeeklySummary(brand) {
   const channel = await client.channels.fetch(brand.payouts_channel_id);
   if (!channel?.isTextBased()) throw new Error('Payout channel is not text based');
   const now = dayjs().tz(brand.timezone);
-  // At Saturday rollover, select the completed Saturday-through-Friday week.
-  const { start, end } = weekWindow(now.subtract(1, 'day'), 'sat', brand.timezone);
+  // Run just before Saturday rollover and close the current Saturday-Friday week.
+  const { start, end } = weekWindow(now, 'sat', brand.timezone);
   const { embed } = await buildWeeklySummary(brand, start, end);
-  await channel.send({ embeds: [embed] });
+  const finalPayEmbeds = await buildFinalPayEmbeds(brand, start, end);
+  const embeds = [embed, ...finalPayEmbeds];
+
+  // Post both reports during the same closeout. Discord allows 10 embeds per message.
+  for (let index = 0; index < embeds.length; index += 10) {
+    await channel.send({ embeds: embeds.slice(index, index + 10) });
+  }
 }
 
 client.once('clientReady', async () => {
@@ -547,9 +553,9 @@ client.once('clientReady', async () => {
   }
 
   for (const brand of BRANDS) {
-    // Post at 12:01 AM Saturday, just after the new week begins.
+    // Post both /payout and /finalpay reports at 11:59 PM Friday, before rollover.
     new CronJob(
-      '1 0 * * 6',
+      '59 23 * * 5',
       () => postWeeklySummary(brand).catch(error => {
         console.error('Weekly post error', brand.name, error);
       }),
