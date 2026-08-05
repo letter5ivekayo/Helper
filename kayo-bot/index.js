@@ -431,10 +431,11 @@ async function buildFinalPayEmbeds(brand, start, end) {
       embed.addFields(pageEmployees.map((item, employeeIndex) => {
         const overallIndex = pageIndex * 18 + employeeIndex + 1;
         const salesLabel = item.sales === 1 ? 'sale' : 'sales';
+        const isPaid = paidKeys.has(employeeKey(item.employee));
         return {
-          name: `${overallIndex}. ${item.employee}`.slice(0, 256),
+          name: `${isPaid ? '🟢 ✅' : '⚪'} ${overallIndex}. ${item.employee}`.slice(0, 256),
           value:
-            `Status: ${paidKeys.has(employeeKey(item.employee)) ? '**PAID**' : '**UNPAID**'}\n` +
+            `Status: **${isPaid ? 'PAID' : 'UNPAID'}**\n` +
             `Sales: **${fmt(item.gross)}** (${item.sales} ${salesLabel})\n` +
             `Commission: ${fmt(item.commission)}\n` +
             `Paycheck: **${fmt(item.paycheck)}**`,
@@ -459,7 +460,7 @@ async function buildPaidChecklistComponents(brand, brandIndex, start, end) {
     .setMinValues(1)
     .setMaxValues(visibleEmployees.length)
     .addOptions(visibleEmployees.map((item, index) => ({
-      label: `${paidKeys.has(employeeKey(item.employee)) ? '[PAID]' : '[UNPAID]'} ${item.employee}`.slice(0, 100),
+      label: `${paidKeys.has(employeeKey(item.employee)) ? '🟢 ✅ PAID' : '⚪ UNPAID'} | ${item.employee}`.slice(0, 100),
       description: `Paycheck ${fmt(item.paycheck)}`.slice(0, 100),
       value: String(index),
     })));
@@ -1135,5 +1136,6 @@ client.on('messageCreate', async message => {
 });
 
 client.login(process.env.BOT_TOKEN);
+
 
 
