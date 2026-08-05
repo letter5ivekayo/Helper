@@ -713,6 +713,38 @@ function reimbursementBrandComponents() {
   ];
 }
 
+function reimbursementQuickModal(brand, brandIndex, interaction) {
+  return new ModalBuilder()
+    .setCustomId(`reimbursement-quick-modal:${brandIndex}`)
+    .setTitle(`${brand.name} Reimbursement`.slice(0, 45))
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('item')
+          .setLabel('Item or reason')
+          .setPlaceholder('Example: Repair kit')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('amount')
+          .setLabel('Total reimbursement amount')
+          .setPlaceholder('Example: 2500')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('notes')
+          .setLabel('Notes (optional)')
+          .setPlaceholder('Receipt number or other details')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+      )
+    );
+}
+
 async function reimbursementItemPanel(brand, brandIndex) {
   const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
   if (!items.length) {
@@ -780,7 +812,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    await interaction.update(await reimbursementItemPanel(brand, brandIndex));
+    await interaction.showModal(reimbursementQuickModal(brand, brandIndex, interaction));
     return;
   }
 
@@ -903,7 +935,12 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('reimbursement-modal:')) {
+  if (
+    interaction.isModalSubmit() &&
+    (interaction.customId.startsWith('reimbursement-modal:') ||
+      interaction.customId.startsWith('reimbursement-quick-modal:'))
+  ) {
+    const isQuickModal = interaction.customId.startsWith('reimbursement-quick-modal:');
     const [, brandIndexText, itemIndexText] = interaction.customId.split(':');
     const brand = BRANDS[Number(brandIndexText)];
     if (!brand) return;
@@ -914,23 +951,43 @@ client.on('interactionCreate', async interaction => {
       const loggedBy = interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
       const sheet = await storeFor(brand.sheet_id).reimbursementSheet(brand);
       const notes = interaction.fields.getTextInputValue('notes').trim();
-      const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
-      const item = items[Number(itemIndexText)];
-      if (!item) throw new Error('That reimbursement item is no longer available');
-      const quantity = Number(interaction.fields.getTextInputValue('quantity'));
-      if (!Number.isInteger(quantity) || quantity < 1) throw new Error('Quantity must be a whole number of at least 1');
-      const amount = item.price * quantity;
+      let item;
+      let quantity;
+      let amount;
+      if (isQuickModal) {
+        const itemName = interaction.fields.getTextInputValue('item').trim();
+        amount = Number(
+          interaction.fields.getTextInputValue('amount').replace(/[^0-9.-]/g, '')
+        );
+        if (!itemName) throw new Error('Enter an item or reason');
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new Error('Amount must be a number greater than zero');
+        }
+        quantity = 1;
+        item = { name: itemName, price: amount };
+      } else {
+        const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
+        item = items[Number(itemIndexText)];
+        if (!item) throw new Error('That reimbursement item is no longer available');
+        quantity = Number(interaction.fields.getTextInputValue('quantity'));
+        if (!Number.isInteger(quantity) || quantity < 1) {
+          throw new Error('Quantity must be a whole number of at least 1');
+        }
+        amount = item.price * quantity;
+      }
+      const employee = isQuickModal
+        ? loggedBy
+        : interaction.fields.getTextInputValue('employee').trim();
       const reimbursementId = `${timestamp.valueOf()}-${interaction.user.id}`;
       await sheet.addRow({
         reimbursement_id: reimbursementId,
         ts_iso: timestamp.toISOString(), ts_epoch: timestamp.valueOf(), brand: brand.name,
         logged_by: loggedBy, logged_by_id: interaction.user.id,
-        employee: interaction.fields.getTextInputValue('employee').trim(),
+        employee,
         item: item.name, quantity, unit_price: item.price, amount,
         notes, status: 'UNPAID', paid_by: '', paid_at: '',
       });
 
-      const employee = interaction.fields.getTextInputValue('employee').trim();
       const reimbursementChannelId =
         brand.reimbursements_channel_id || brand.reimbursement_channel_id;
       let channelMessage = '';
@@ -1142,17 +1199,18 @@ client.on('interactionCreate', async interaction => {
   const ephemeral = ['payout-employee', 'reimbursement', 'reimbursement-items']
     .includes(interaction.commandName);
   try {
+    if (interaction.commandName === 'reimbursement' && BRANDS.length === 1) {
+      await interaction.showModal(reimbursementQuickModal(BRANDS[0], 0, interaction));
+      return;
+    }
+
     await interaction.deferReply({ flags: ephemeral ? MessageFlags.Ephemeral : undefined });
 
     if (interaction.commandName === 'reimbursement') {
-      if (BRANDS.length === 1) {
-        await interaction.editReply(await reimbursementItemPanel(BRANDS[0], 0));
-      } else {
-        await interaction.editReply({
-          content: '### 🧾 Log a Reimbursement\nSelect the business.',
-          components: reimbursementBrandComponents(),
-        });
-      }
+      await interaction.editReply({
+        content: '### 🧾 Log a Reimbursement\nSelect the business.',
+        components: reimbursementBrandComponents(),
+      });
       return;
     }
 
