@@ -863,7 +863,51 @@ client.on('interactionCreate', async interaction => {
         item: item.name, quantity, unit_price: item.price, amount,
         notes,
       });
-      await interaction.editReply(`Saved **${quantity} x ${item.name}** for **${fmt(amount)}** under **${brand.name}**.`);
+
+      const employee = interaction.fields.getTextInputValue('employee').trim();
+      const reimbursementChannelId =
+        brand.reimbursements_channel_id || brand.reimbursement_channel_id;
+      let channelMessage = '';
+
+      try {
+        if (!reimbursementChannelId) {
+          throw new Error('No reimbursements_channel_id is configured for this business');
+        }
+        const reimbursementChannel = await client.channels.fetch(reimbursementChannelId);
+        if (!reimbursementChannel?.isTextBased()) {
+          throw new Error('The configured reimbursements channel is not a text channel');
+        }
+
+        const logEmbed = new EmbedBuilder()
+          .setColor(brand.embed_color || 0x5865f2)
+          .setTitle(`🧾 ${brand.name} Reimbursement`)
+          .addFields(
+            { name: 'Employee', value: employee || 'Unknown', inline: true },
+            { name: 'Total', value: `**${fmt(amount)}**`, inline: true },
+            { name: 'Item', value: item.name, inline: true },
+            { name: 'Quantity', value: String(quantity), inline: true },
+            { name: 'Unit Price', value: fmt(item.price), inline: true },
+            { name: 'Logged By', value: `<@${interaction.user.id}>`, inline: true }
+          )
+          .setFooter({ text: `Employee reimbursement • ${brand.timezone}` })
+          .setTimestamp(timestamp.toDate());
+
+        if (notes) {
+          logEmbed.addFields({ name: 'Notes', value: notes.slice(0, 1024) });
+        }
+
+        await reimbursementChannel.send({ embeds: [logEmbed] });
+        channelMessage = '\nPosted in the reimbursements channel.';
+      } catch (channelError) {
+        console.error('Reimbursement channel log error:', channelError);
+        channelMessage =
+          `\n⚠️ Spreadsheet saved, but the channel post failed: ${channelError.message}`;
+      }
+
+      await interaction.editReply(
+        `Saved **${quantity} x ${item.name}** for **${fmt(amount)}** under ` +
+        `**${brand.name}**.${channelMessage}`
+      );
     } catch (error) {
       console.error('Business log error:', error);
       await interaction.editReply(`Could not save entry: ${error.message}`);
