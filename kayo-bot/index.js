@@ -1,3 +1,4 @@
+// PAYOUT BOT BUILD: OPTION-B-COMPACT-UI
 import 'dotenv/config';
 import {
   Client,
@@ -410,17 +411,13 @@ async function buildFinalPayEmbeds(brand, start, end) {
   return pages.map((pageEmployees, pageIndex) => {
     const embed = new EmbedBuilder()
       .setColor(employees.length > 0 && paidCount === employees.length ? 0x22c55e : (brand.embed_color || 0x7d3fd6))
-      .setTitle(`${brand.name} • Payroll Overview`)
+      .setTitle(`${brand.name} Payroll • ${start.format('MMM D')}–${endInclusive.format('MMM D')}`)
       .setDescription(
-        `**${start.format('MMM D')} — ${endInclusive.format('MMM D, YYYY')}**\n` +
-        `> **${paidCount}/${employees.length} paid**  •  Saturday–Friday\n` +
-        `> ${percentageLabel(commissionRate)} commission  →  ` +
-        `${percentageLabel(paycheckRate)} paycheck rate`
-      )
-      .addFields(
-        { name: '💰 SALES', value: `**${fmt(grossTotal)}**`, inline: true },
-        { name: '📈 COMMISSION', value: `**${fmt(commissionTotal)}**`, inline: true },
-        { name: '💵 PAYROLL', value: `**${fmt(paycheckTotal)}**`, inline: true }
+        `💵 **Payroll ${fmt(paycheckTotal)}**  •  ` +
+        `**${paidCount} of ${employees.length} paid**\n` +
+        `Sales ${fmt(grossTotal)}  •  Commission ${fmt(commissionTotal)}\n` +
+        `${percentageLabel(commissionRate)} commission → ` +
+        `${percentageLabel(paycheckRate)} paycheck  •  Saturday–Friday`
       )
       .setFooter({
         text: `${employees.length} employees  •  ${rows.length} sales${pages.length > 1 ? `  •  Page ${pageIndex + 1}/${pages.length}` : ''}`,
@@ -434,13 +431,12 @@ async function buildFinalPayEmbeds(brand, start, end) {
         const salesLabel = item.sales === 1 ? 'sale' : 'sales';
         const isPaid = paidKeys.has(employeeKey(item.employee));
         return {
-          name: `${isPaid ? '🟢' : '⚪'} ${item.employee}`.slice(0, 256),
+          name: `${isPaid ? '✅' : '◻️'} ${item.employee}  —  ${fmt(item.paycheck)}`.slice(0, 256),
           value:
-            `${isPaid ? '**PAID ✓**' : '**UNPAID**'}\n` +
-            `Sales · **${fmt(item.gross)}** · ${item.sales} ${salesLabel}\n` +
-            `Commission · **${fmt(item.commission)}**\n` +
-            `Paycheck · **${fmt(item.paycheck)}**`,
-          inline: true,
+            `${isPaid ? '**PAID**' : '**UNPAID**'}  •  ` +
+            `${item.sales} ${salesLabel}  •  Sales ${fmt(item.gross)}  •  ` +
+            `Commission ${fmt(item.commission)}`,
+          inline: false,
         };
       }));
     }
