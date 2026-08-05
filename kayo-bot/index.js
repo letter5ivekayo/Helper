@@ -812,7 +812,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    await interaction.showModal(reimbursementQuickModal(brand, brandIndex, interaction));
+    await interaction.update(await reimbursementItemPanel(brand, brandIndex));
     return;
   }
 
@@ -900,26 +900,16 @@ client.on('interactionCreate', async interaction => {
     const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
     const item = items[itemIndex];
     if (!item) return;
-    const defaultEmployee =
-      interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
     const modal = new ModalBuilder()
       .setCustomId(`reimbursement-modal:${brandIndex}:${itemIndex}`)
       .setTitle(`${brand.name} Reimbursement`)
       .addComponents(
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
-            .setCustomId('employee')
-            .setLabel('Employee being reimbursed')
+            .setCustomId('amount')
+            .setLabel(`Amount for ${item.name}`.slice(0, 45))
             .setStyle(TextInputStyle.Short)
-            .setValue(defaultEmployee.slice(0, 4000))
-            .setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('quantity')
-            .setLabel(`Quantity of ${item.name}`.slice(0, 45))
-            .setStyle(TextInputStyle.Short)
-            .setValue('1')
+            .setValue(String(item.price))
             .setRequired(true)
         ),
         new ActionRowBuilder().addComponents(
@@ -969,15 +959,16 @@ client.on('interactionCreate', async interaction => {
         const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
         item = items[Number(itemIndexText)];
         if (!item) throw new Error('That reimbursement item is no longer available');
-        quantity = Number(interaction.fields.getTextInputValue('quantity'));
-        if (!Number.isInteger(quantity) || quantity < 1) {
-          throw new Error('Quantity must be a whole number of at least 1');
+        amount = Number(
+          interaction.fields.getTextInputValue('amount').replace(/[^0-9.-]/g, '')
+        );
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new Error('Amount must be a number greater than zero');
         }
-        amount = item.price * quantity;
+        quantity = 1;
+        item = { ...item, price: amount };
       }
-      const employee = isQuickModal
-        ? loggedBy
-        : interaction.fields.getTextInputValue('employee').trim();
+      const employee = loggedBy;
       const reimbursementId = `${timestamp.valueOf()}-${interaction.user.id}`;
       await sheet.addRow({
         reimbursement_id: reimbursementId,
@@ -1199,18 +1190,17 @@ client.on('interactionCreate', async interaction => {
   const ephemeral = ['payout-employee', 'reimbursement', 'reimbursement-items']
     .includes(interaction.commandName);
   try {
-    if (interaction.commandName === 'reimbursement' && BRANDS.length === 1) {
-      await interaction.showModal(reimbursementQuickModal(BRANDS[0], 0, interaction));
-      return;
-    }
-
     await interaction.deferReply({ flags: ephemeral ? MessageFlags.Ephemeral : undefined });
 
     if (interaction.commandName === 'reimbursement') {
-      await interaction.editReply({
-        content: '### 🧾 Log a Reimbursement\nSelect the business.',
-        components: reimbursementBrandComponents(),
-      });
+      if (BRANDS.length === 1) {
+        await interaction.editReply(await reimbursementItemPanel(BRANDS[0], 0));
+      } else {
+        await interaction.editReply({
+          content: '### 🧾 Log a Reimbursement\nSelect the business.',
+          components: reimbursementBrandComponents(),
+        });
+      }
       return;
     }
 
