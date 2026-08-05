@@ -694,6 +694,12 @@ client.once('clientReady', async () => {
   }
 });
 
+const reimbursementDrafts = new Map();
+
+function reimbursementDraftKey(userId, brandIndex) {
+  return `${userId}:${brandIndex}`;
+}
+
 function reimbursementBrandComponents() {
   const menu = new StringSelectMenuBuilder()
     .setCustomId('reimbursement-brand')
@@ -745,7 +751,7 @@ function reimbursementQuickModal(brand, brandIndex, interaction) {
     );
 }
 
-async function reimbursementItemPanel(brand, brandIndex) {
+async function reimbursementItemPanel(brand, brandIndex, draft = {}) {
   const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
   if (!items.length) {
     return {
@@ -775,8 +781,29 @@ async function reimbursementItemPanel(brand, brandIndex) {
       label: item.name.slice(0, 100),
       description: `${fmt(item.price)} each`.slice(0, 100),
       value: String(index),
+      default: draft.itemIndex === index,
+    })));
+
+  const amounts = [...new Set(items.map(item => item.price))]
+    .filter(amount => Number.isFinite(amount) && amount > 0)
+    .sort((a, b) => a - b)
+    .slice(0, 25);
+  const amountMenu = new StringSelectMenuBuilder()
+    .setCustomId(`reimbursement-amount:${brandIndex}`)
+    .setPlaceholder('Select the reimbursement amount…')
+    .addOptions(amounts.map(amount => ({
+      label: fmt(amount).slice(0, 100),
+      description: 'Configured reimbursement amount',
+      value: String(amount),
+      default: draft.amount === amount,
     })));
   const controls = [
+    new ButtonBuilder()
+      .setCustomId(`reimbursement-submit:${brandIndex}`)
+      .setLabel('Submit Reimbursement')
+      .setEmoji('🧾')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(draft.itemIndex === undefined || draft.amount === undefined),
     new ButtonBuilder()
       .setCustomId('reimbursement-cancel')
       .setLabel('Cancel')
@@ -794,9 +821,10 @@ async function reimbursementItemPanel(brand, brandIndex) {
   return {
     content:
       `### 🧾 ${brand.name} Reimbursement\n` +
-      'Choose an item below. Its saved price will be used automatically.',
+      'Choose the item and amount, then submit.',
     components: [
       new ActionRowBuilder().addComponents(itemMenu),
+      new ActionRowBuilder().addComponents(amountMenu),
       new ActionRowBuilder().addComponents(...controls),
     ],
   };
@@ -812,6 +840,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    reimbursementDrafts.delete(reimbursementDraftKey(interaction.user.id, brandIndex));
     await interaction.update(await reimbursementItemPanel(brand, brandIndex));
     return;
   }
@@ -897,31 +926,104 @@ client.on('interactionCreate', async interaction => {
     const itemIndex = Number(interaction.values[0]);
     const brand = BRANDS[brandIndex];
     if (!brand) return;
-    const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
-    const item = items[itemIndex];
-    if (!item) return;
-    const modal = new ModalBuilder()
-      .setCustomId(`reimbursement-modal:${brandIndex}:${itemIndex}`)
-      .setTitle(`${brand.name} Reimbursement`)
-      .addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('amount')
-            .setLabel(`Amount for ${item.name}`.slice(0, 45))
-            .setStyle(TextInputStyle.Short)
-            .setValue(String(item.price))
-            .setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('notes')
-            .setLabel('Notes (optional)')
-            .setPlaceholder('Reason, receipt number, or other details')
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(false)
+    const key = reimbursementDraftKey(interaction.user.id, brandIndex);
+    const draft = reimbursementDrafts.get(key) || {};
+    draft.itemIndex = itemIndex;
+    reimbursementDrafts.set(key, draft);
+    await interaction.update(await reimbursementItemPanel(brand, brandIndex, draft));
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('reimbursement-amount:')) {
+    const brandIndex = Number(interaction.customId.split(':')[1]);
+    const brand = BRANDS[brandIndex];
+    if (!brand) return;
+    const key = reimbursementDraftKey(interaction.user.id, brandIndex);
+    const draft = reimbursementDrafts.get(key) || {};
+    draft.amount = Number(interaction.values[0]);
+    reimbursementDrafts.set(key, draft);
+    await interaction.update(await reimbursementItemPanel(brand, brandIndex, draft));
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('reimbursement-submit:')) {
+    const brandIndex = Number(interaction.customId.split(':')[1]);
+    const brand = BRANDS[brandIndex];
+    if (!brand) return;
+    const key = reimbursementDraftKey(interaction.user.id, brandIndex);
+    const draft = reimbursementDrafts.get(key);
+    await interaction.deferUpdate();
+
+    try {
+      if (!draft || draft.itemIndex === undefined || draft.amount === undefined) {
+        throw new Error('Select both an item and an amount');
+      }
+      const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
+      const item = items[draft.itemIndex];
+      if (!item) throw new Error('That reimbursement item is no longer available');
+
+      const timestamp = dayjs().tz(brand.timezone);
+      const employee =
+        interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
+      const reimbursementId = `${timestamp.valueOf()}-${interaction.user.id}`;
+      const sheet = await storeFor(brand.sheet_id).reimbursementSheet(brand);
+      await sheet.addRow({
+        reimbursement_id: reimbursementId,
+        ts_iso: timestamp.toISOString(),
+        ts_epoch: timestamp.valueOf(),
+        brand: brand.name,
+        logged_by: employee,
+        logged_by_id: interaction.user.id,
+        employee,
+        item: item.name,
+        quantity: 1,
+        unit_price: draft.amount,
+        amount: draft.amount,
+        notes: '',
+        status: 'UNPAID',
+        paid_by: '',
+        paid_at: '',
+      });
+
+      const channelId = brand.reimbursements_channel_id || brand.reimbursement_channel_id;
+      if (!channelId) throw new Error('No reimbursements_channel_id is configured');
+      const channel = await client.channels.fetch(channelId);
+      if (!channel?.isTextBased()) throw new Error('Reimbursements channel is not text based');
+
+      const embed = new EmbedBuilder()
+        .setColor(brand.embed_color || 0x5865f2)
+        .setTitle(`🧾 ${brand.name} Reimbursement`)
+        .addFields(
+          { name: 'Employee', value: employee, inline: true },
+          { name: 'Total', value: `**${fmt(draft.amount)}**`, inline: true },
+          { name: 'Item', value: item.name, inline: true },
+          { name: 'Logged By', value: `<@${interaction.user.id}>`, inline: true },
+          { name: 'Status', value: '🔴 **UNPAID**', inline: false }
         )
-      );
-    await interaction.showModal(modal);
+        .setFooter({ text: `Employee reimbursement • ${brand.timezone}` })
+        .setTimestamp(timestamp.toDate());
+      const paidButton = new ButtonBuilder()
+        .setCustomId(`reimbursement-mark-paid:${brandIndex}:${reimbursementId}`)
+        .setLabel('Mark Paid')
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success);
+      await channel.send({
+        embeds: [embed],
+        components: [new ActionRowBuilder().addComponents(paidButton)],
+      });
+
+      reimbursementDrafts.delete(key);
+      await interaction.editReply({
+        content: `Saved **${item.name}** for **${fmt(draft.amount)}** and posted it publicly.`,
+        components: [],
+      });
+    } catch (error) {
+      console.error('Reimbursement submit error:', error);
+      await interaction.editReply({
+        content: `Could not submit reimbursement: ${error.message}`,
+        components: [],
+      });
+    }
     return;
   }
 
@@ -1194,6 +1296,7 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'reimbursement') {
       if (BRANDS.length === 1) {
+        reimbursementDrafts.delete(reimbursementDraftKey(interaction.user.id, 0));
         await interaction.editReply(await reimbursementItemPanel(BRANDS[0], 0));
       } else {
         await interaction.editReply({
