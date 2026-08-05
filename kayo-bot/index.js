@@ -690,6 +690,82 @@ client.once('clientReady', async () => {
   }
 });
 
+function reimbursementBrandComponents() {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('reimbursement-brand')
+    .setPlaceholder('Select a business…')
+    .addOptions(BRANDS.slice(0, 25).map((brand, index) => ({
+      label: brand.name.slice(0, 100),
+      description: 'Open reimbursement items',
+      value: String(index),
+    })));
+  const cancel = new ButtonBuilder()
+    .setCustomId('reimbursement-cancel')
+    .setLabel('Cancel')
+    .setStyle(ButtonStyle.Secondary);
+  return [
+    new ActionRowBuilder().addComponents(menu),
+    new ActionRowBuilder().addComponents(cancel),
+  ];
+}
+
+async function reimbursementItemPanel(brand, brandIndex) {
+  const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
+  if (!items.length) {
+    return {
+      content:
+        `### 🧾 ${brand.name} Reimbursement\n` +
+        `No reimbursement items are configured. An administrator can add them with ` +
+        '`/reimbursement-items`.',
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('reimbursement-back')
+            .setLabel('Back')
+            .setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder()
+            .setCustomId('reimbursement-cancel')
+            .setLabel('Close')
+            .setStyle(ButtonStyle.Secondary)
+        ),
+      ],
+    };
+  }
+
+  const itemMenu = new StringSelectMenuBuilder()
+    .setCustomId(`reimbursement-item:${brandIndex}`)
+    .setPlaceholder('Select the item being reimbursed…')
+    .addOptions(items.slice(0, 25).map((item, index) => ({
+      label: item.name.slice(0, 100),
+      description: `${fmt(item.price)} each`.slice(0, 100),
+      value: String(index),
+    })));
+  const controls = [
+    new ButtonBuilder()
+      .setCustomId('reimbursement-cancel')
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary),
+  ];
+  if (BRANDS.length > 1) {
+    controls.unshift(
+      new ButtonBuilder()
+        .setCustomId('reimbursement-back')
+        .setLabel('Back')
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+
+  return {
+    content:
+      `### 🧾 ${brand.name} Reimbursement\n` +
+      'Choose an item below. Its saved price will be used automatically.',
+    components: [
+      new ActionRowBuilder().addComponents(itemMenu),
+      new ActionRowBuilder().addComponents(...controls),
+    ],
+  };
+}
+
 // Intentionally one interactionCreate handler so every command is acknowledged once.
 client.on('interactionCreate', async interaction => {
   if (interaction.isStringSelectMenu() && interaction.customId === 'reimbursement-brand') {
@@ -700,25 +776,22 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
-    if (!items.length) {
-      await interaction.update({
-        content: `No reimbursement items are configured for **${brand.name}**. An administrator can add them with \`/reimbursement-items\`.`,
-        components: [],
-      });
-      return;
-    }
-    const itemMenu = new StringSelectMenuBuilder()
-      .setCustomId(`reimbursement-item:${brandIndex}`)
-      .setPlaceholder('Choose an item')
-      .addOptions(items.slice(0, 25).map((item, index) => ({
-        label: item.name.slice(0, 100),
-        description: `${fmt(item.price)} each`.slice(0, 100),
-        value: String(index),
-      })));
+    await interaction.update(await reimbursementItemPanel(brand, brandIndex));
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'reimbursement-back') {
     await interaction.update({
-      content: `**${brand.name} Reimbursement**\nChoose an item.`,
-      components: [new ActionRowBuilder().addComponents(itemMenu)],
+      content: '### 🧾 Log a Reimbursement\nSelect the business.',
+      components: reimbursementBrandComponents(),
+    });
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'reimbursement-cancel') {
+    await interaction.update({
+      content: 'Reimbursement cancelled.',
+      components: [],
     });
     return;
   }
@@ -731,13 +804,36 @@ client.on('interactionCreate', async interaction => {
     const items = await storeFor(brand.sheet_id).reimbursementItems(brand);
     const item = items[itemIndex];
     if (!item) return;
+    const defaultEmployee =
+      interaction.member?.displayName || interaction.user.globalName || interaction.user.username;
     const modal = new ModalBuilder()
       .setCustomId(`reimbursement-modal:${brandIndex}:${itemIndex}`)
       .setTitle(`${brand.name} Reimbursement`)
       .addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('employee').setLabel('Employee being reimbursed').setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('quantity').setLabel(`Quantity of ${item.name}`.slice(0, 45)).setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('notes').setLabel('Additional notes').setStyle(TextInputStyle.Paragraph).setRequired(false))
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('employee')
+            .setLabel('Employee being reimbursed')
+            .setStyle(TextInputStyle.Short)
+            .setValue(defaultEmployee.slice(0, 4000))
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('quantity')
+            .setLabel(`Quantity of ${item.name}`.slice(0, 45))
+            .setStyle(TextInputStyle.Short)
+            .setValue('1')
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('notes')
+            .setLabel('Notes (optional)')
+            .setPlaceholder('Reason, receipt number, or other details')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(false)
+        )
       );
     await interaction.showModal(modal);
     return;
@@ -930,17 +1026,14 @@ client.on('interactionCreate', async interaction => {
     await interaction.deferReply({ flags: ephemeral ? MessageFlags.Ephemeral : undefined });
 
     if (interaction.commandName === 'reimbursement') {
-      const brandMenu = new StringSelectMenuBuilder()
-        .setCustomId('reimbursement-brand')
-        .setPlaceholder('Choose a business')
-        .addOptions(BRANDS.slice(0, 25).map((brand, index) => ({
-          label: brand.name.slice(0, 100),
-          value: String(index),
-        })));
-      await interaction.editReply({
-        content: '**Log a Reimbursement**\nChoose the business.',
-        components: [new ActionRowBuilder().addComponents(brandMenu)],
-      });
+      if (BRANDS.length === 1) {
+        await interaction.editReply(await reimbursementItemPanel(BRANDS[0], 0));
+      } else {
+        await interaction.editReply({
+          content: '### 🧾 Log a Reimbursement\nSelect the business.',
+          components: reimbursementBrandComponents(),
+        });
+      }
       return;
     }
 
