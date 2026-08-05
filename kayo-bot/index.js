@@ -215,7 +215,11 @@ class SheetStore {
   async reimbursementSheet(brand) {
     await this.init();
     const title = safeSheetTitle(`${brand.name}__Reimbursements`);
-    const headers = ['ts_iso', 'ts_epoch', 'brand', 'logged_by', 'logged_by_id', 'employee', 'item', 'quantity', 'unit_price', 'amount', 'notes'];
+    const headers = [
+      'reimbursement_id', 'ts_iso', 'ts_epoch', 'brand', 'logged_by',
+      'logged_by_id', 'employee', 'item', 'quantity', 'unit_price', 'amount',
+      'notes', 'status', 'paid_by', 'paid_at',
+    ];
 
     let sheet = this.doc.sheetsByTitle[title];
     if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
@@ -796,6 +800,66 @@ client.on('interactionCreate', async interaction => {
     return;
   }
 
+  if (
+    interaction.isButton() &&
+    interaction.customId.startsWith('reimbursement-mark-paid:')
+  ) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({
+        content: 'You need the Manage Server permission to mark reimbursements paid.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferUpdate();
+    try {
+      const [, brandIndexText, ...idParts] = interaction.customId.split(':');
+      const brand = BRANDS[Number(brandIndexText)];
+      const reimbursementId = idParts.join(':');
+      if (!brand || !reimbursementId) throw new Error('Invalid reimbursement reference');
+
+      const sheet = await storeFor(brand.sheet_id).reimbursementSheet(brand);
+      const rows = await sheet.getRows();
+      const row = rows.find(
+        entry => String(entry.get('reimbursement_id')) === reimbursementId
+      );
+      if (!row) throw new Error('The reimbursement row could not be found');
+
+      if (String(row.get('status') || '').toUpperCase() !== 'PAID') {
+        row.set('status', 'PAID');
+        row.set('paid_by', interaction.user.id);
+        row.set('paid_at', new Date().toISOString());
+        await row.save();
+      }
+
+      const currentEmbed = interaction.message.embeds[0];
+      if (!currentEmbed) throw new Error('The reimbursement embed is missing');
+      const paidEmbed = EmbedBuilder.from(currentEmbed)
+        .setColor(0x22c55e)
+        .setFields(
+          ...currentEmbed.fields
+            .filter(field => field.name !== 'Status')
+            .map(field => ({
+              name: field.name,
+              value: field.value,
+              inline: field.inline,
+            })),
+          { name: 'Status', value: `✅ **PAID** by <@${interaction.user.id}>`, inline: false }
+        )
+        .setTimestamp(new Date());
+
+      await interaction.editReply({ embeds: [paidEmbed], components: [] });
+    } catch (error) {
+      console.error('Mark reimbursement paid error:', error);
+      await interaction.followUp({
+        content: `Could not mark this reimbursement paid: ${error.message}`,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    return;
+  }
+
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('reimbursement-item:')) {
     const brandIndex = Number(interaction.customId.split(':')[1]);
     const itemIndex = Number(interaction.values[0]);
@@ -856,12 +920,14 @@ client.on('interactionCreate', async interaction => {
       const quantity = Number(interaction.fields.getTextInputValue('quantity'));
       if (!Number.isInteger(quantity) || quantity < 1) throw new Error('Quantity must be a whole number of at least 1');
       const amount = item.price * quantity;
+      const reimbursementId = `${timestamp.valueOf()}-${interaction.user.id}`;
       await sheet.addRow({
+        reimbursement_id: reimbursementId,
         ts_iso: timestamp.toISOString(), ts_epoch: timestamp.valueOf(), brand: brand.name,
         logged_by: loggedBy, logged_by_id: interaction.user.id,
         employee: interaction.fields.getTextInputValue('employee').trim(),
         item: item.name, quantity, unit_price: item.price, amount,
-        notes,
+        notes, status: 'UNPAID', paid_by: '', paid_at: '',
       });
 
       const employee = interaction.fields.getTextInputValue('employee').trim();
@@ -887,7 +953,8 @@ client.on('interactionCreate', async interaction => {
             { name: 'Item', value: item.name, inline: true },
             { name: 'Quantity', value: String(quantity), inline: true },
             { name: 'Unit Price', value: fmt(item.price), inline: true },
-            { name: 'Logged By', value: `<@${interaction.user.id}>`, inline: true }
+            { name: 'Logged By', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Status', value: '🔴 **UNPAID**', inline: false }
           )
           .setFooter({ text: `Employee reimbursement • ${brand.timezone}` })
           .setTimestamp(timestamp.toDate());
@@ -896,7 +963,15 @@ client.on('interactionCreate', async interaction => {
           logEmbed.addFields({ name: 'Notes', value: notes.slice(0, 1024) });
         }
 
-        await reimbursementChannel.send({ embeds: [logEmbed] });
+        const paidButton = new ButtonBuilder()
+          .setCustomId(`reimbursement-mark-paid:${brandIndexText}:${reimbursementId}`)
+          .setLabel('Mark Paid')
+          .setEmoji('✅')
+          .setStyle(ButtonStyle.Success);
+        await reimbursementChannel.send({
+          embeds: [logEmbed],
+          components: [new ActionRowBuilder().addComponents(paidButton)],
+        });
         channelMessage = '\nPosted in the reimbursements channel.';
       } catch (channelError) {
         console.error('Reimbursement channel log error:', channelError);
