@@ -198,6 +198,7 @@ class SheetStore {
     await this.init();
     const title = safeSheetTitle(`${brand.name}__Raffle`);
     const headers = [
+      'discord_message_id',
       'ts_iso',
       'ts_epoch',
       'brand',
@@ -205,6 +206,7 @@ class SheetStore {
       'seller_id',
       'buyer_name',
       'buyer_id',
+      'item',
       'tickets',
     ];
     let sheet = this.doc.sheetsByTitle[title];
@@ -327,6 +329,29 @@ const fmt = value => new Intl.NumberFormat('en-US', {
 
 function findBrand(name) {
   return BRANDS.find(brand => brand.name.toLowerCase() === String(name || '').toLowerCase());
+}
+
+function findBrandForChannel(channelId) {
+  return BRANDS.find(brand => [
+    brand.log_channel_id,
+    brand.payouts_channel_id,
+    brand.raffle_channel_id,
+  ].some(id => String(id || '') === String(channelId)));
+}
+
+function raffleTicketQuantity(itemText) {
+  const item = String(itemText || '').trim();
+  if (!/raffle|ticket/i.test(item)) return 0;
+  for (const pattern of [
+    /(?:qty|quantity)\s*[:=-]?\s*(\d+)/i,
+    /(?:x|×)\s*(\d+)/i,
+    /(\d+)\s*(?:x|×)/i,
+    /\b(\d+)\b/,
+  ]) {
+    const match = item.match(pattern);
+    if (match) return Math.max(1, Number(match[1]));
+  }
+  return 1;
 }
 
 function limitEmbedText(lines, limit = 1024) {
@@ -532,18 +557,8 @@ const commands = [
     default_member_permissions: String(PermissionFlagsBits.ManageGuild),
   },
   {
-    name: 'raffle',
-    description: 'Log raffle tickets purchased by you',
-    options: [
-      { name: 'brand', description: 'Brand name', type: 3, required: true },
-      {
-        name: 'tickets',
-        description: 'Number of tickets',
-        type: 4,
-        required: true,
-        min_value: 1,
-      },
-    ],
+    name: 'raffletotals',
+    description: 'Show automatically logged raffle ticket totals',
   },
 ];
 
@@ -574,16 +589,16 @@ async function registerCommands() {
     const registered = await rest.get(scope.listRoute);
     for (const command of registered) {
       if (
-        command.name === 'raffle' &&
+        ['raffle', 'raffletotals'].includes(command.name) &&
         Array.isArray(command.options) &&
         command.options.length > 0
       ) {
         await rest.delete(scope.commandRoute(command.id));
-        console.log(`Deleted stale /raffle from ${scope.name}`);
+        console.log(`Deleted stale /${command.name} from ${scope.name}`);
       }
     }
     await rest.put(scope.listRoute, { body: commands });
-    console.log(`Registered slash commands in ${scope.name}; /raffle has no options`);
+    console.log(`Registered slash commands in ${scope.name}; /raffletotals has no options`);
   }
 }
 
@@ -1319,7 +1334,7 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (!interaction.isChatInputCommand()) return;
-  if (!['payout', 'finalpay', 'lastweek', 'payout-employee', 'reimbursement', 'reimbursement-items', 'raffle'].includes(interaction.commandName)) return;
+  if (!['payout', 'finalpay', 'lastweek', 'payout-employee', 'reimbursement', 'reimbursement-items', 'raffletotals'].includes(interaction.commandName)) return;
 
   const ephemeral = ['payout-employee', 'reimbursement', 'reimbursement-items']
     .includes(interaction.commandName);
@@ -1446,6 +1461,38 @@ client.on('interactionCreate', async interaction => {
           await interaction.followUp({ embeds: embeds.slice(index, index + 10) });
         }
       }
+      return;
+    }
+
+    if (interaction.commandName === 'raffletotals') {
+      const raffleBrand = findBrandForChannel(interaction.channelId) ||
+        (BRANDS.length === 1 ? BRANDS[0] : null);
+      if (!raffleBrand) {
+        await interaction.editReply(
+          'Run `/raffletotals` in that business’s invoice, payout, or raffle channel.'
+        );
+        return;
+      }
+      const raffleSheet = await storeFor(raffleBrand.sheet_id).raffleSheet(raffleBrand);
+      const raffleRows = await raffleSheet.getRows();
+      const totals = new Map();
+      for (const row of raffleRows) {
+        const name = String(row.get('buyer_name') || 'Unknown').trim() || 'Unknown';
+        const key = name.replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+        const tickets = Number(String(row.get('tickets') || '0').replace(/[^0-9.-]/g, '')) || 0;
+        const current = totals.get(key) || { name, tickets: 0 };
+        current.tickets += tickets;
+        totals.set(key, current);
+      }
+      const lines = [...totals.values()]
+        .sort((a, b) => b.tickets - a.tickets || a.name.localeCompare(b.name))
+        .map(entry => `${entry.name} - ${entry.tickets} tickets`);
+      const embed = new EmbedBuilder()
+        .setColor(raffleBrand.embed_color || 0x7d3fd6)
+        .setTitle(`🎟️ ${raffleBrand.name} Raffle Totals`)
+        .setDescription(`\`\`\`text\n${limitEmbedText(lines, 3900)}\n\`\`\``)
+        .setTimestamp(new Date());
+      await interaction.editReply({ embeds: [embed] });
       return;
     }
 
@@ -1580,6 +1627,34 @@ client.on('messageCreate', async message => {
         invoiced_by: invoicedBy,
         invoice_status: 'PAID',
       });
+
+      const itemText = extractField(embed, 'Item') || extractField(embed, 'Items') ||
+        extractField(embed, 'Item Name') || extractField(embed, 'Item(s)');
+      const tickets = raffleTicketQuantity(itemText);
+      if (tickets > 0) {
+        const buyerName = extractField(embed, 'Buyer Name') ||
+          extractField(embed, 'Customer Name') || extractField(embed, 'Paid By Name') ||
+          extractField(embed, 'Paid By') || 'Unknown';
+        const raffleSheet = await storeFor(brand.sheet_id).raffleSheet(brand);
+        const raffleRows = await raffleSheet.getRows();
+        const duplicate = raffleRows.some(
+          row => String(row.get('discord_message_id') || '') === String(message.id)
+        );
+        if (!duplicate) {
+          await raffleSheet.addRow({
+            discord_message_id: message.id,
+            ts_iso: timestamp.toISOString(),
+            ts_epoch: timestamp.valueOf(),
+            brand: brand.name,
+            seller_name: invoicedBy,
+            seller_id: '',
+            buyer_name: buyerName,
+            buyer_id: '',
+            item: itemText,
+            tickets,
+          });
+        }
+      }
     }
   } catch (error) {
     console.error('Message handler error:', error);
