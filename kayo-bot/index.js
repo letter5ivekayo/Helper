@@ -204,11 +204,16 @@ class SheetStore {
       'seller_name',
       'seller_id',
       'buyer_name',
+      'buyer_id',
       'tickets',
     ];
     let sheet = this.doc.sheetsByTitle[title];
     if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
-    else await sheet.loadHeaderRow(1);
+    else {
+      await sheet.loadHeaderRow(1);
+      const missing = headers.filter(header => !sheet.headerValues.includes(header));
+      if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
+    }
     return sheet;
   }
 
@@ -528,10 +533,9 @@ const commands = [
   },
   {
     name: 'raffle',
-    description: 'Log raffle tickets',
+    description: 'Log raffle tickets purchased by you',
     options: [
       { name: 'brand', description: 'Brand name', type: 3, required: true },
-      { name: 'buyer', description: 'Buyer name', type: 3, required: true },
       {
         name: 'tickets',
         description: 'Number of tickets',
@@ -1435,24 +1439,55 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'raffle') {
-      const buyer = interaction.options.getString('buyer', true).trim();
       const tickets = interaction.options.getInteger('tickets', true);
       const timestamp = dayjs().tz(brand.timezone);
       const raffleSheet = await storeFor(brand.sheet_id).raffleSheet(brand);
-      const sellerName = interaction.member?.displayName || interaction.user.globalName ||
+      const buyerName = interaction.member?.displayName || interaction.user.globalName ||
         interaction.user.username;
 
       await raffleSheet.addRow({
         ts_iso: timestamp.toISOString(),
         ts_epoch: timestamp.valueOf(),
         brand: brand.name,
-        seller_name: sellerName,
+        seller_name: buyerName,
         seller_id: interaction.user.id,
-        buyer_name: buyer,
+        buyer_name: buyerName,
+        buyer_id: interaction.user.id,
         tickets,
       });
+
+      const raffleRows = await raffleSheet.getRows();
+      const raffleTotals = new Map();
+      for (const row of raffleRows) {
+        const rowBuyerName = String(row.get('buyer_name') || 'Unknown').trim() || 'Unknown';
+        const key = rowBuyerName.replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+        const rowTickets = Number(String(row.get('tickets') || '0').replace(/[^0-9.-]/g, '')) || 0;
+        const current = raffleTotals.get(key) || { name: rowBuyerName, tickets: 0 };
+        current.tickets += rowTickets;
+        raffleTotals.set(key, current);
+      }
+      const totalLines = [...raffleTotals.values()]
+        .sort((a, b) => b.tickets - a.tickets || a.name.localeCompare(b.name))
+        .map(entry => `${entry.name} - ${entry.tickets} tickets`);
+      const copyText = limitEmbedText(totalLines, 990);
+
+      const raffleEmbed = new EmbedBuilder()
+        .setColor(brand.embed_color || 0x7d3fd6)
+        .setTitle('🎟️ Raffle Ticket Purchase')
+        .addFields(
+          { name: 'Buyer', value: buyerName, inline: true },
+          { name: 'Tickets', value: `**${tickets}**`, inline: true },
+          { name: 'Business', value: `**${brand.name}**`, inline: true },
+          {
+            name: 'Copy/Paste Raffle Totals',
+            value: `\`\`\`text\n${copyText}\n\`\`\``,
+            inline: false,
+          }
+        )
+        .setFooter({ text: `Buyer ID: ${interaction.user.id}` })
+        .setTimestamp(timestamp.toDate());
       await interaction.editReply({
-        content: `Logged ${tickets} raffle ticket(s) for “${buyer}” under ${brand.name}.`,
+        embeds: [raffleEmbed],
       });
       return;
     }
