@@ -553,35 +553,38 @@ async function registerCommands() {
     return;
   }
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-  const route = process.env.GUILD_ID
-    ? Routes.applicationGuildCommands(process.env.APPLICATION_ID, process.env.GUILD_ID)
-    : Routes.applicationCommands(process.env.APPLICATION_ID);
+  const applicationId = process.env.APPLICATION_ID;
+  const configuredGuilds = process.env.GUILD_ID
+    ? [process.env.GUILD_ID]
+    : [...client.guilds.cache.keys()];
+  const scopes = [
+    {
+      name: 'global',
+      listRoute: Routes.applicationCommands(applicationId),
+      commandRoute: commandId => Routes.applicationCommand(applicationId, commandId),
+    },
+    ...configuredGuilds.map(guildId => ({
+      name: `guild ${guildId}`,
+      listRoute: Routes.applicationGuildCommands(applicationId, guildId),
+      commandRoute: commandId => Routes.applicationGuildCommand(applicationId, guildId, commandId),
+    })),
+  ];
 
-  // Remove a stale /raffle definition so Discord cannot retain its old options.
-  const registeredCommands = await rest.get(route);
-  const staleRaffle = registeredCommands.find(command =>
-    command.name === 'raffle' && Array.isArray(command.options) && command.options.length > 0
-  );
-  if (staleRaffle) {
-    const staleRoute = process.env.GUILD_ID
-      ? Routes.applicationGuildCommand(
-          process.env.APPLICATION_ID,
-          process.env.GUILD_ID,
-          staleRaffle.id
-        )
-      : Routes.applicationCommand(process.env.APPLICATION_ID, staleRaffle.id);
-    await rest.delete(staleRoute);
-    console.log('Deleted stale /raffle command definition');
+  for (const scope of scopes) {
+    const registered = await rest.get(scope.listRoute);
+    for (const command of registered) {
+      if (
+        command.name === 'raffle' &&
+        Array.isArray(command.options) &&
+        command.options.length > 0
+      ) {
+        await rest.delete(scope.commandRoute(command.id));
+        console.log(`Deleted stale /raffle from ${scope.name}`);
+      }
+    }
+    await rest.put(scope.listRoute, { body: commands });
+    console.log(`Registered slash commands in ${scope.name}; /raffle has no options`);
   }
-
-  // Bulk overwrite registers the current command definitions.
-  await rest.put(route, { body: commands });
-  console.log('/raffle registered with no options');
-  console.log(
-    process.env.GUILD_ID
-      ? `Slash commands registered for guild ${process.env.GUILD_ID}`
-      : 'Global slash commands registered'
-  );
 }
 
 async function buildWeeklySummaryLegacy(brand, start, end) {
