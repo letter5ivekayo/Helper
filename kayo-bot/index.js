@@ -557,9 +557,26 @@ async function registerCommands() {
     ? Routes.applicationGuildCommands(process.env.APPLICATION_ID, process.env.GUILD_ID)
     : Routes.applicationCommands(process.env.APPLICATION_ID);
 
-  // PUT replaces the existing command definitions, removing the old required
-  // brand option from /payout. Guild commands update immediately.
+  // Remove a stale /raffle definition so Discord cannot retain its old options.
+  const registeredCommands = await rest.get(route);
+  const staleRaffle = registeredCommands.find(command =>
+    command.name === 'raffle' && Array.isArray(command.options) && command.options.length > 0
+  );
+  if (staleRaffle) {
+    const staleRoute = process.env.GUILD_ID
+      ? Routes.applicationGuildCommand(
+          process.env.APPLICATION_ID,
+          process.env.GUILD_ID,
+          staleRaffle.id
+        )
+      : Routes.applicationCommand(process.env.APPLICATION_ID, staleRaffle.id);
+    await rest.delete(staleRoute);
+    console.log('Deleted stale /raffle command definition');
+  }
+
+  // Bulk overwrite registers the current command definitions.
   await rest.put(route, { body: commands });
+  console.log('/raffle registered with no options');
   console.log(
     process.env.GUILD_ID
       ? `Slash commands registered for guild ${process.env.GUILD_ID}`
