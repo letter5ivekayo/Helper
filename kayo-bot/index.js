@@ -194,6 +194,69 @@ class SheetStore {
     });
   }
 
+  async raffleEntriesSheet(brand) {
+    await this.init();
+    const title = safeSheetTitle(`${brand.name}__Raffle_Entries`);
+    const headers = [
+      'discord_message_id', 'ts_iso', 'ts_epoch', 'brand', 'buyer_name',
+      'buyer_id', 'buyer_key', 'item_text', 'tickets', 'source_channel_id',
+    ];
+    let sheet = this.doc.sheetsByTitle[title];
+    if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
+    else {
+      await sheet.loadHeaderRow(1);
+      const missing = headers.filter(header => !sheet.headerValues.includes(header));
+      if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
+    }
+    return sheet;
+  }
+
+  async raffleTotalsSheet(brand) {
+    await this.init();
+    const title = safeSheetTitle(`${brand.name}__Raffle_Totals`);
+    const headers = ['buyer_name', 'buyer_key', 'total_tickets', 'last_updated'];
+    let sheet = this.doc.sheetsByTitle[title];
+    if (!sheet) sheet = await this.doc.addSheet({ title, headerValues: headers });
+    else {
+      await sheet.loadHeaderRow(1);
+      const missing = headers.filter(header => !sheet.headerValues.includes(header));
+      if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
+    }
+    return sheet;
+  }
+
+  async appendRafflePurchase(brand, purchase) {
+    const entries = await this.raffleEntriesSheet(brand);
+    const existingEntries = await entries.getRows();
+    const duplicate = existingEntries.some(row =>
+      String(row.get('discord_message_id') || '') === String(purchase.discord_message_id)
+    );
+    if (duplicate) return { deduped: true };
+
+    await entries.addRow(purchase);
+
+    const totals = await this.raffleTotalsSheet(brand);
+    const totalRows = await totals.getRows();
+    const totalRow = totalRows.find(row =>
+      String(row.get('buyer_key') || '') === purchase.buyer_key
+    );
+    if (totalRow) {
+      const current = Number(String(totalRow.get('total_tickets') || '0').replace(/[^0-9.-]/g, '')) || 0;
+      totalRow.set('buyer_name', purchase.buyer_name);
+      totalRow.set('total_tickets', current + purchase.tickets);
+      totalRow.set('last_updated', purchase.ts_iso);
+      await totalRow.save();
+    } else {
+      await totals.addRow({
+        buyer_name: purchase.buyer_name,
+        buyer_key: purchase.buyer_key,
+        total_tickets: purchase.tickets,
+        last_updated: purchase.ts_iso,
+      });
+    }
+    return { ok: true };
+  }
+
   async reimbursementSheet(brand) {
     await this.init();
     const title = safeSheetTitle(`${brand.name}__Reimbursements`);
@@ -294,6 +357,75 @@ function extractField(embed, key) {
     item => item.name?.trim().toLowerCase() === key.toLowerCase()
   );
   return (field?.value?.trim() || '').replace(/^`+|`+$/g, '').trim();
+}
+
+function extractFieldLike(embed, names) {
+  const wanted = names.map(name => name.toLowerCase());
+  const field = (embed.fields || []).find(item => {
+    const fieldName = String(item.name || '').trim().toLowerCase();
+    return wanted.some(name => fieldName === name || fieldName.includes(name));
+  });
+  return (field?.value?.trim() || '').replace(/^`+|`+$/g, '').trim();
+}
+
+function raffleKeywordsFor(brand) {
+  const configured = brand.raffle_item_keywords || brand.raffle_keywords;
+  if (Array.isArray(configured) && configured.length) {
+    return configured.map(value => String(value).trim().toLowerCase()).filter(Boolean);
+  }
+  return ['raffle', 'ticket'];
+}
+
+function parseRaffleTickets(itemText, brand) {
+  const text = String(itemText || '').trim();
+  if (!text) return 0;
+  const keywords = raffleKeywordsFor(brand);
+  const matchingLines = text.split(/\r?\n/).filter(line =>
+    keywords.some(keyword => line.toLowerCase().includes(keyword))
+  );
+  if (!matchingLines.length) return 0;
+
+  let total = 0;
+  for (const line of matchingLines) {
+    let quantity = 0;
+    for (const pattern of [
+      /(?:qty|quantity)\s*[:=-]?\s*(\d+)/i,
+      /(?:x|×)\s*(\d+)/i,
+      /(\d+)\s*(?:x|×)/i,
+      /(\d+)\s*(?:raffle\s*)?tickets?/i,
+      /\((\d+)\)/,
+    ]) {
+      const match = line.match(pattern);
+      if (match) {
+        quantity = Number(match[1]);
+        break;
+      }
+    }
+    total += Math.max(1, quantity || 1);
+  }
+  return total;
+}
+
+function normalizedPersonKey(name) {
+  return String(name || 'Unknown').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+}
+
+async function raffleBuyerFromEmbed(embed, message) {
+  let name =
+    extractFieldLike(embed, ['buyer name', 'customer name', 'paid by name']) ||
+    extractField(embed, 'Paid By') ||
+    'Unknown';
+  const mention = name.match(/<@!?(\d+)>/);
+  const buyerId = mention?.[1] || '';
+  if (buyerId && message.guild) {
+    try {
+      const member = await message.guild.members.fetch(buyerId);
+      name = member.displayName || member.user.globalName || member.user.username;
+    } catch {
+      // Keep the original field value when the member is not available.
+    }
+  }
+  return { name: name.trim() || 'Unknown', id: buyerId };
 }
 
 const fmt = value => new Intl.NumberFormat('en-US', {
@@ -1485,6 +1617,32 @@ client.on('messageCreate', async message => {
         invoiced_by: invoicedBy,
         invoice_status: 'PAID',
       });
+
+      const itemText = extractFieldLike(embed, [
+        'item', 'items', 'items purchased', 'item section',
+      ]);
+      const tickets = parseRaffleTickets(itemText, brand);
+      if (tickets > 0) {
+        const buyer = await raffleBuyerFromEmbed(embed, message);
+        const buyerKey = buyer.id || normalizedPersonKey(buyer.name);
+        const result = await storeFor(brand.sheet_id).appendRafflePurchase(brand, {
+          discord_message_id: message.id,
+          ts_iso: timestamp.toISOString(),
+          ts_epoch: timestamp.valueOf(),
+          brand: brand.name,
+          buyer_name: buyer.name,
+          buyer_id: buyer.id,
+          buyer_key: buyerKey,
+          item_text: itemText,
+          tickets,
+          source_channel_id: message.channelId,
+        });
+        if (!result.deduped) {
+          console.log(
+            `Raffle purchase logged: ${brand.name} | ${buyer.name} | ${tickets} ticket(s)`
+          );
+        }
+      }
 
     }
   } catch (error) {
