@@ -321,6 +321,14 @@ function extractField(embed, key) {
   return (field?.value?.trim() || '').replace(/^`+|`+$/g, '').trim();
 }
 
+function extractFieldContaining(embed, key) {
+  const wanted = key.toLowerCase();
+  const field = (embed.fields || []).find(item =>
+    String(item.name || '').trim().toLowerCase().includes(wanted)
+  );
+  return (field?.value?.trim() || '').replace(/^`+|`+$/g, '').trim();
+}
+
 const fmt = value => new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -339,13 +347,16 @@ function findBrandForChannel(channelId) {
   ].some(id => String(id || '') === String(channelId)));
 }
 
-function raffleTicketQuantity(itemText) {
+function raffleTicketQuantity(itemText, raffleContext = itemText) {
   const item = String(itemText || '').trim();
-  if (!/raffle|ticket/i.test(item)) return 0;
+  if (!/raffle|ticket/i.test(String(raffleContext || ''))) return 0;
   for (const pattern of [
     /(?:qty|quantity)\s*[:=-]?\s*(\d+)/i,
+    /raffle\s*tickets?\s*[:=-]?\s*(\d+)/i,
+    /(\d+)\s*raffle\s*tickets?/i,
     /(?:x|×)\s*(\d+)/i,
     /(\d+)\s*(?:x|×)/i,
+    /\((\d+)\)/,
     /\b(\d+)\b/,
   ]) {
     const match = item.match(pattern);
@@ -1629,8 +1640,16 @@ client.on('messageCreate', async message => {
       });
 
       const itemText = extractField(embed, 'Item') || extractField(embed, 'Items') ||
-        extractField(embed, 'Item Name') || extractField(embed, 'Item(s)');
-      const tickets = raffleTicketQuantity(itemText);
+        extractField(embed, 'Item Name') || extractField(embed, 'Item(s)') ||
+        extractFieldContaining(embed, 'item');
+      const raffleContext = [
+        itemText,
+        extractField(embed, 'Job Name'),
+        extractField(embed, 'Memo'),
+        embed.title || '',
+        embed.description || '',
+      ].join(' ');
+      const tickets = raffleTicketQuantity(itemText, raffleContext);
       if (tickets > 0) {
         const buyerName = extractField(embed, 'Buyer Name') ||
           extractField(embed, 'Customer Name') || extractField(embed, 'Paid By Name') ||
