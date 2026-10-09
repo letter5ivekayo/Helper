@@ -23,6 +23,7 @@ import { CronJob } from 'cron';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
+import { createPrivateKey } from 'node:crypto';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -38,24 +39,47 @@ const RAW_HEADERS = [
   'amount',
   'memo',
   'invoiced_by',
+  'paid_by',
+  'self_invoice',
   'invoice_status',
 ];
 
-function parseBrands() {
-  try {
-    return JSON.parse(process.env.BRANDS_JSON || '[]');
-  } catch (error) {
-    throw new Error(`BRANDS_JSON is not valid JSON: ${error.message}`);
-  }
-}
+const BRANDS = [
+  {
+    name: 'Driveline',
+    log_channel_id: '1473906658672382137',
+    payouts_channel_id: '1534439033126518795',
+    sheet_id: '1pYQuFhLfmUGjlAPX0YY2urJCK9iphkU9HC_iX96ZDx4',
+    timezone: 'America/Chicago',
+    week_start: 'sat',
+    reimbursements_channel_id: '1534679307769745468',
+    embed_color: '#7D3FD6',
+  },
+  {
+    name: '5 Star Ammo',
+    log_channel_id: '1498850906303889418',
+    payouts_channel_id: '1534439033126518795',
+    sheet_id: '1pYQuFhLfmUGjlAPX0YY2urJCK9iphkU9HC_iX96ZDx4',
+    timezone: 'America/Chicago',
+    week_start: 'sat',
+    reimbursements_channel_id: '1534679307769745468',
+    embed_color: '#7D3FD6',
+  },
+  {
+    name: 'Stay Woke',
+    log_channel_id: '1527125963429777428',
+    payouts_channel_id: '1534439033126518795',
+    sheet_id: '1pYQuFhLfmUGjlAPX0YY2urJCK9iphkU9HC_iX96ZDx4',
+    timezone: 'America/Chicago',
+    week_start: 'sat',
+    reimbursements_channel_id: '1534679307769745468',
+    embed_color: '#7D3FD6',
+  },
+];
 
-const BRANDS = parseBrands();
 if (!process.env.BOT_TOKEN) throw new Error('BOT_TOKEN missing');
 if (!process.env.GOOGLE_SERVICE_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
   throw new Error('Google service account credentials missing');
-}
-if (!Array.isArray(BRANDS) || BRANDS.length === 0) {
-  throw new Error('BRANDS_JSON missing or empty');
 }
 
 for (const brand of BRANDS) {
@@ -75,7 +99,103 @@ for (const brand of BRANDS) {
 }
 
 const SERVICE_EMAIL = process.env.GOOGLE_SERVICE_EMAIL;
-const PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
+
+function describeGoogleKey(value) {
+  // Report only structural checks. Never print the key, its body, or a fingerprint.
+  const raw = String(value || '').trim();
+  const quoted = (raw.startsWith('"') && raw.endsWith('"')) ||
+    (raw.startsWith("'") && raw.endsWith("'"));
+  const literalNewlines = raw.includes('\\n');
+  const actualNewlines = raw.includes('\n');
+  console.error('[Google key check] Environment variable present:', Boolean(raw));
+  console.error('[Google key check] Surrounded by quotes:', quoted);
+  console.error('[Google key check] Escaped newline sequences:', literalNewlines);
+  console.error('[Google key check] Actual newline characters:', actualNewlines);
+  console.error('[Google key check] PEM begin marker:', /-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(raw));
+  console.error('[Google key check] PEM end marker:', /-----END (?:RSA )?PRIVATE KEY-----/.test(raw));
+}
+
+function normalizeGooglePrivateKey(value) {
+  let key = String(value || '').trim();
+
+  // Secret managers sometimes preserve the quotes and JSON escaping from the
+  // service-account file. Decode that form before rebuilding the PEM.
+  if (key.startsWith('"') && key.endsWith('"')) {
+    try {
+      key = JSON.parse(key);
+    } catch {
+      key = key.slice(1, -1);
+    }
+  } else if (key.startsWith("'") && key.endsWith("'")) {
+    key = key.slice(1, -1);
+  }
+
+  // Handle both ordinary and double-escaped newline sequences.
+  key = key
+    .replace(/\\\\r\\\\n/g, '\n')
+    .replace(/\\\\n/g, '\n')
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n?/g, '\n')
+    .trim();
+
+  // Rebuild the PEM body so values flattened to one line by a hosting
+  // dashboard are accepted too.
+  const pem = key.match(
+    /-----BEGIN (PRIVATE KEY|RSA PRIVATE KEY)-----([\s\S]*?)-----END \1-----/
+  );
+  if (!pem) {
+    describeGoogleKey(value);
+    throw new Error(
+      'GOOGLE_PRIVATE_KEY is not a valid PEM private key. Copy the private_key value ' +
+      'from the Google service-account JSON without changing it.'
+    );
+  }
+
+  // Remove whitespace and invisible text-editor separators without altering key bytes.
+  const rawBody = pem[2];
+  // Decode formatting escapes and line-continuation backslashes, not key data.
+  let body = rawBody
+    .replace(/\\(?=\r?\n)/g, '')
+    .replace(/\\[rt]/g, '')
+    .replace(/\\/g, '')
+    .replace(/[\s\u200B-\u200D\u2060\uFEFF]/g, '');
+  const alphabetValid = /^[A-Za-z0-9+/]+={0,2}$/.test(body);
+  // Unpadded Base64 can still represent the complete original DER key.
+  if (/^[A-Za-z0-9+/]+$/.test(body) && [2, 3].includes(body.length % 4)) {
+    body += '='.repeat(4 - body.length % 4);
+  }
+  const lines = body.match(/.{1,64}/g) || [];
+  const base64Valid = /^[A-Za-z0-9+/]+={0,2}$/.test(body) && body.length % 4 === 0;
+  if (!base64Valid) {
+    describeGoogleKey(value);
+    console.error('[Google key check] Base64 alphabet valid:', alphabetValid);
+    console.error('[Google key check] Base64 length remainder:', body.length % 4);
+    console.error('[Google key check] Contains backslash:', body.includes('\\'));
+    console.error('[Google key check] Backslash before line break:', /\\[ \t]*\r?\n/.test(rawBody));
+    console.error('[Google key check] Standalone backslash:', /\\(?![nrt\\])/.test(body));
+    console.error('[Google key check] Contains quote:', /["']/.test(body));
+    console.error('[Google key check] Contains non-ASCII characters:', /[^\x00-\x7F]/.test(body));
+    console.error('[Google key check] PEM body contains invalid Base64 characters or length.');
+    throw new Error('GOOGLE_PRIVATE_KEY contains invalid Base64 data; check for truncated or altered key text.');
+  }
+  key = `-----BEGIN ${pem[1]}-----\n${lines.join('\n')}\n-----END ${pem[1]}-----\n`;
+
+  try {
+    createPrivateKey(key);
+  } catch (error) {
+    describeGoogleKey(value);
+    console.error('[Google key check] PEM markers matched and Base64 format passed, but OpenSSL rejected the key.');
+    throw new Error(
+      `GOOGLE_PRIVATE_KEY could not be decoded (${error.code || error.message}). ` +
+      'Replace it with the private_key value from a current JSON service-account key.'
+    );
+  }
+
+  return key;
+}
+
+const PRIVATE_KEY = normalizeGooglePrivateKey(process.env.GOOGLE_PRIVATE_KEY);
 
 function weekWindow(reference, startOn = 'sun', tzName = 'America/Phoenix') {
   const local = dayjs.tz(reference, tzName);
@@ -138,9 +258,7 @@ class SheetStore {
         } else {
           await sheet.loadHeaderRow(1);
           const missing = RAW_HEADERS.filter(header => !sheet.headerValues.includes(header));
-          if (missing.length) {
-            throw new Error(`${title} is missing columns: ${missing.join(', ')}`);
-          }
+          if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
         }
         return sheet;
       })().catch(error => {
@@ -158,10 +276,21 @@ class SheetStore {
 
     // Each Discord message belongs to exactly one weekly tab, so dedupe in that tab.
     const rows = await sheet.getRows();
-    const duplicate = rows.some(
+    const duplicate = rows.find(
       existing => String(existing.get('discord_message_id')) === String(row.discord_message_id)
     );
-    if (duplicate) return { deduped: true };
+    if (duplicate) {
+      let updated = false;
+      for (const header of ['paid_by', 'self_invoice']) {
+        const next = String(row[header] || '').trim();
+        if (next && String(duplicate.get(header) || '').trim() !== next) {
+          duplicate.set(header, next);
+          updated = true;
+        }
+      }
+      if (updated) await duplicate.save();
+      return { deduped: true, updated };
+    }
 
     await sheet.addRow(row);
     return { ok: true };
@@ -189,6 +318,8 @@ class SheetStore {
         amount: Number(String(row.get('amount') || '0').replace(/[^0-9.-]/g, '')) || 0,
         memo: row.get('memo'),
         invoiced_by: row.get('invoiced_by'),
+        paid_by: row.get('paid_by'),
+        self_invoice: String(row.get('self_invoice') || '').trim().toUpperCase() === 'YES',
         invoice_status: row.get('invoice_status'),
       }];
     });
@@ -263,7 +394,8 @@ class SheetStore {
     const headers = [
       'reimbursement_id', 'ts_iso', 'ts_epoch', 'brand', 'logged_by',
       'logged_by_id', 'employee', 'item', 'quantity', 'unit_price', 'amount',
-      'notes', 'status', 'paid_by', 'paid_at',
+      'notes', 'status', 'paid_by', 'paid_at', 'source', 'source_message_id',
+      'shop_name',
     ];
 
     let sheet = this.doc.sheetsByTitle[title];
@@ -274,6 +406,17 @@ class SheetStore {
       if (missing.length) await sheet.setHeaderRow([...sheet.headerValues, ...missing]);
     }
     return sheet;
+  }
+
+  async appendReimbursement(brand, row) {
+    const sheet = await this.reimbursementSheet(brand);
+    const rows = await sheet.getRows();
+    const duplicate = rows.some(existing =>
+      String(existing.get('reimbursement_id') || '') === String(row.reimbursement_id)
+    );
+    if (duplicate) return { deduped: true };
+    await sheet.addRow(row);
+    return { ok: true };
   }
 
   async reimbursementItemsSheet(brand) {
@@ -298,6 +441,31 @@ class SheetStore {
       const name = String(row.get('item_name') || '').trim();
       const price = Number(String(row.get('unit_price') || '').replace(/[^0-9.-]/g, ''));
       return name && Number.isFinite(price) ? [{ name, price }] : [];
+    });
+  }
+
+  async unpaidReimbursements(brand, endEpoch = Number.POSITIVE_INFINITY) {
+    const sheet = await this.reimbursementSheet(brand);
+    const rows = await sheet.getRows();
+    const wantedBrand = brand.name.trim().toLowerCase();
+    return rows.flatMap(row => {
+      const rowBrand = String(row.get('brand') || '').trim().toLowerCase();
+      const status = String(row.get('status') || 'UNPAID').trim().toUpperCase();
+      const tsEpoch = Number(String(row.get('ts_epoch') || '').replace(/[^0-9.-]/g, ''));
+      const amount = Number(String(row.get('amount') || '0').replace(/[^0-9.-]/g, '')) || 0;
+      if (rowBrand !== wantedBrand || status === 'PAID' || amount <= 0) return [];
+      if (Number.isFinite(tsEpoch) && tsEpoch >= endEpoch) return [];
+      return [{
+        reimbursement_id: row.get('reimbursement_id'),
+        ts_iso: row.get('ts_iso'),
+        ts_epoch: Number.isFinite(tsEpoch) ? tsEpoch : 0,
+        employee: String(row.get('employee') || 'Unknown').trim() || 'Unknown',
+        item: String(row.get('item') || 'Reimbursement').trim() || 'Reimbursement',
+        quantity: Number(String(row.get('quantity') || '1').replace(/[^0-9.-]/g, '')) || 1,
+        amount,
+        notes: String(row.get('notes') || '').trim(),
+        source: String(row.get('source') || '').trim(),
+      }];
     });
   }
 
@@ -350,6 +518,55 @@ function hasPaidEmbed(embed) {
   if (fields.some(field => field.name.includes('invoice paid'))) return true;
   return fields.some(field => field.name === 'paid by') &&
     fields.some(field => field.name === 'amount');
+}
+
+function extractLabeledValue(embed, names) {
+  const fieldValue = extractFieldLike(embed, names);
+  if (fieldValue) return fieldValue;
+
+  const wanted = names.map(name => name.toLowerCase());
+  const lines = String(embed.description || '').split(/\r?\n/);
+  for (const line of lines) {
+    const separator = line.indexOf(':');
+    if (separator < 0) continue;
+    const label = line.slice(0, separator).replace(/[*_`~]/g, '').trim().toLowerCase();
+    if (wanted.some(name => label === name || label.includes(name))) {
+      return line
+        .slice(separator + 1)
+        .trim()
+        .replace(/^(?:\*\*|__|~~|`)+\s*/, '')
+        .replace(/\s*(?:\*\*|__|~~|`)+$/, '')
+        .trim();
+    }
+  }
+  return '';
+}
+
+function parseShopPurchaseEmbed(embed) {
+  const title = String(embed.title || '').trim().toLowerCase();
+  const description = String(embed.description || '').trim().toLowerCase();
+  const player = extractLabeledValue(embed, ['player', 'player name', 'purchased by']);
+  const item = extractLabeledValue(embed, ['item', 'item name']);
+  const quantity = Number.parseInt(
+    String(extractLabeledValue(embed, ['quantity', 'qty']) || '0').replace(/[^0-9-]/g, ''),
+    10
+  );
+  const amount = Number(
+    String(extractLabeledValue(embed, ['cost', 'total cost', 'price']) || '0')
+      .replace(/[^0-9.-]/g, '')
+  );
+  const shopName = extractLabeledValue(embed, [
+    'mechanic shop', 'business', 'shop name', 'shop',
+  ]);
+  const looksLikePurchase = title.includes('item purchased') ||
+    description.includes('item purchased');
+
+  if (!looksLikePurchase || !player || !item || !Number.isFinite(quantity) || quantity <= 0 ||
+      !Number.isFinite(amount) || amount <= 0) {
+    return null;
+  }
+
+  return { player, item, quantity, amount, shopName };
 }
 
 function extractField(embed, key) {
@@ -408,6 +625,48 @@ function parseRaffleTickets(itemText, brand) {
 
 function normalizedPersonKey(name) {
   return String(name || 'Unknown').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+}
+
+function personIdentityKeys(...values) {
+  const keys = new Set();
+  for (const value of values) {
+    const raw = String(value || '').replace(/^`+|`+$/g, '').trim();
+    if (!raw) continue;
+
+    for (const match of raw.matchAll(/<@!?(\d+)>/g)) keys.add(`discord:${match[1]}`);
+
+    const withoutMentions = raw
+      .replace(/<@!?\d+>/g, ' ')
+      .replace(/[*_~|`]/g, ' ')
+      .replace(/[\s|/,:;()\[\]{}-]+/g, ' ')
+      .trim();
+    const normalized = normalizedPersonKey(withoutMentions);
+    if (normalized && normalized !== 'unknown') keys.add(`name:${normalized}`);
+  }
+  return keys;
+}
+
+function detectSelfInvoice(embed) {
+  const paidBy =
+    extractFieldLike(embed, ['paid by name', 'buyer name', 'customer name']) ||
+    extractField(embed, 'Paid By');
+  const invoicedBy =
+    extractField(embed, 'Invoiced By Name') ||
+    extractField(embed, 'Invoiced By');
+
+  const paidKeys = personIdentityKeys(
+    paidBy,
+    extractField(embed, 'Paid By'),
+    extractField(embed, 'Paid By Name')
+  );
+  const invoicedKeys = personIdentityKeys(
+    invoicedBy,
+    extractField(embed, 'Invoiced By'),
+    extractField(embed, 'Invoiced By Name')
+  );
+  const isSelfInvoice = [...paidKeys].some(key => invoicedKeys.has(key));
+
+  return { paidBy, invoicedBy, isSelfInvoice };
 }
 
 async function raffleBuyerFromEmbed(embed, message) {
@@ -487,7 +746,7 @@ function employeeKey(value) {
 
 function groupPayoutsByEmployee(rows, commissionRate, paycheckRate) {
   const grouped = new Map();
-  for (const row of rows) {
+  for (const row of rows.filter(item => !item.self_invoice)) {
     const displayName = String(row.invoiced_by || 'UNKNOWN').trim().replace(/\s+/g, ' ') || 'UNKNOWN';
     const key = employeeKey(displayName);
     const current = grouped.get(key) || { employee: displayName, gross: 0, sales: 0 };
@@ -504,6 +763,70 @@ function groupPayoutsByEmployee(rows, commissionRate, paycheckRate) {
     .sort((a, b) => b.paycheck - a.paycheck || a.employee.localeCompare(b.employee));
 }
 
+function groupReimbursementsByEmployee(rows) {
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = employeeKey(row.employee);
+    const current = grouped.get(key) || {
+      employee: row.employee,
+      total: 0,
+      reimbursements: [],
+    };
+    current.total += row.amount;
+    current.reimbursements.push(row);
+    grouped.set(key, current);
+  }
+  return [...grouped.values()].sort(
+    (a, b) => b.total - a.total || a.employee.localeCompare(b.employee)
+  );
+}
+
+async function buildReimbursementsOwedEmbeds(brand, end) {
+  const rows = await storeFor(brand.sheet_id).unpaidReimbursements(brand, end.valueOf());
+  const employees = groupReimbursementsByEmployee(rows);
+  const totalOwed = rows.reduce((sum, row) => sum + row.amount, 0);
+  const pages = [];
+  for (let index = 0; index < employees.length; index += 15) {
+    pages.push(employees.slice(index, index + 15));
+  }
+  if (!pages.length) pages.push([]);
+
+  return pages.map((pageEmployees, pageIndex) => {
+    const embed = new EmbedBuilder()
+      .setColor(totalOwed > 0 ? 0xf59e0b : 0x22c55e)
+      .setTitle(`🧾 ${brand.name} Reimbursements Owed`)
+      .setDescription(
+        totalOwed > 0
+          ? `**Outstanding total: ${fmt(totalOwed)}**\n` +
+            `All unpaid reimbursements through ${end.subtract(1, 'day').format('MMMM D, YYYY')}.`
+          : '✅ No unpaid reimbursements are currently owed.'
+      )
+      .setFooter({
+        text: `${rows.length} unpaid reimbursement${rows.length === 1 ? '' : 's'}` +
+          `${pages.length > 1 ? ` • Page ${pageIndex + 1}/${pages.length}` : ''}`,
+      })
+      .setTimestamp(new Date());
+
+    if (pageEmployees.length) {
+      embed.addFields(pageEmployees.map(employee => {
+        const lines = employee.reimbursements
+          .slice()
+          .sort((a, b) => a.ts_epoch - b.ts_epoch)
+          .map(row => {
+            const quantity = row.quantity === 1 ? '' : `${row.quantity} × `;
+            return `• ${quantity}${row.item} — **${fmt(row.amount)}**`;
+          });
+        return {
+          name: `${employee.employee} — ${fmt(employee.total)}`.slice(0, 256),
+          value: limitEmbedText(lines),
+          inline: false,
+        };
+      }));
+    }
+    return embed;
+  });
+}
+
 async function buildFinalPayEmbeds(brand, start, end) {
   const rows = await storeFor(brand.sheet_id).fetchRange(
     brand,
@@ -513,6 +836,8 @@ async function buildFinalPayEmbeds(brand, start, end) {
   const commissionRate = commissionRateFor(brand);
   const paycheckRate = paycheckRateFor(brand);
   const employees = groupPayoutsByEmployee(rows, commissionRate, paycheckRate);
+  const eligibleRows = rows.filter(row => !row.self_invoice);
+  const excludedSelfInvoices = rows.length - eligibleRows.length;
   const paidKeys = await storeFor(brand.sheet_id).paidEmployeeKeys(brand, start);
   const pages = [];
   for (let index = 0; index < employees.length; index += 18) {
@@ -526,7 +851,7 @@ async function buildFinalPayEmbeds(brand, start, end) {
   const paidCount = employees.filter(item => paidKeys.has(employeeKey(item.employee))).length;
   const endInclusive = end.subtract(1, 'day');
 
-  return pages.map((pageEmployees, pageIndex) => {
+  const payrollEmbeds = pages.map((pageEmployees, pageIndex) => {
     const embed = new EmbedBuilder()
       .setColor(employees.length > 0 && paidCount === employees.length ? 0x22c55e : (brand.embed_color || 0x7d3fd6))
       .setTitle(`${brand.name} Payroll • ${start.format('MMM D')}–${endInclusive.format('MMM D')}`)
@@ -538,7 +863,9 @@ async function buildFinalPayEmbeds(brand, start, end) {
         `${percentageLabel(paycheckRate)} paycheck  •  Saturday–Friday`
       )
       .setFooter({
-        text: `${employees.length} employees  •  ${rows.length} sales${pages.length > 1 ? `  •  Page ${pageIndex + 1}/${pages.length}` : ''}`,
+        text: `${employees.length} employees  •  ${eligibleRows.length} eligible sales` +
+          `${excludedSelfInvoices ? `  •  ${excludedSelfInvoices} self-invoice${excludedSelfInvoices === 1 ? '' : 's'} excluded` : ''}` +
+          `${pages.length > 1 ? `  •  Page ${pageIndex + 1}/${pages.length}` : ''}`,
       })
       .setTimestamp(new Date());
 
@@ -560,6 +887,8 @@ async function buildFinalPayEmbeds(brand, start, end) {
     }
     return embed;
   });
+  const reimbursementEmbeds = await buildReimbursementsOwedEmbeds(brand, end);
+  return [...payrollEmbeds, ...reimbursementEmbeds];
 }
 
 async function buildPaidChecklistComponents(brand, brandIndex, start, end) {
@@ -596,6 +925,24 @@ async function buildPaidChecklistComponents(brand, brandIndex, start, end) {
         value: String(index),
       })));
     components.push(new ActionRowBuilder().addComponents(markUnpaidMenu));
+  }
+
+  const unpaidReimbursements = (
+    await storeFor(brand.sheet_id).unpaidReimbursements(brand, end.valueOf())
+  ).sort((a, b) => a.ts_epoch - b.ts_epoch);
+  const selectableUnpaidReimbursements = selectableReimbursements(unpaidReimbursements);
+  if (selectableUnpaidReimbursements.length) {
+    const reimbursementMenu = new StringSelectMenuBuilder()
+      .setCustomId(`payout-reimbursement-paid:${brandIndex}:${start.format('YYYY-MM-DD')}`)
+      .setPlaceholder('🧾 Mark reimbursements as paid…')
+      .setMinValues(1)
+      .setMaxValues(selectableUnpaidReimbursements.length)
+      .addOptions(selectableUnpaidReimbursements.map(row => ({
+        label: `${row.employee} — ${fmt(row.amount)}`.slice(0, 100),
+        description: `${row.quantity === 1 ? '' : `${row.quantity} × `}${row.item}`.slice(0, 100),
+        value: row.reimbursement_id,
+      })));
+    components.push(new ActionRowBuilder().addComponents(reimbursementMenu));
   }
 
   return components;
@@ -640,6 +987,34 @@ const commands = [
     description: 'Manage reimbursement items and prices',
     default_member_permissions: String(PermissionFlagsBits.ManageGuild),
   },
+  {
+    name: 'reimbursements',
+    description: 'Open the all-business reimbursement dashboard',
+    default_member_permissions: String(PermissionFlagsBits.ManageGuild),
+  },
+  {
+    name: 'scan-receipts',
+    description: 'Scan recent shop purchases for missing reimbursements',
+    default_member_permissions: String(PermissionFlagsBits.ManageGuild),
+    options: [
+      {
+        name: 'hours',
+        description: 'Hours of history to scan (default 168)',
+        type: 4,
+        required: false,
+        min_value: 1,
+        max_value: 720,
+      },
+      {
+        name: 'max-messages',
+        description: 'Maximum messages per business (default 2000)',
+        type: 4,
+        required: false,
+        min_value: 1,
+        max_value: 10000,
+      },
+    ],
+  },
 ];
 
 async function registerCommands() {
@@ -652,18 +1027,22 @@ async function registerCommands() {
   const configuredGuilds = process.env.GUILD_ID
     ? [process.env.GUILD_ID]
     : [...client.guilds.cache.keys()];
-  const scopes = [
-    {
-      name: 'global',
-      listRoute: Routes.applicationCommands(applicationId),
-      commandRoute: commandId => Routes.applicationCommand(applicationId, commandId),
-    },
-    ...configuredGuilds.map(guildId => ({
+  const scopes = configuredGuilds.length
+    ? configuredGuilds.map(guildId => ({
       name: `guild ${guildId}`,
       listRoute: Routes.applicationGuildCommands(applicationId, guildId),
       commandRoute: commandId => Routes.applicationGuildCommand(applicationId, guildId, commandId),
-    })),
-  ];
+    }))
+    : [{
+      name: 'global',
+      listRoute: Routes.applicationCommands(applicationId),
+      commandRoute: commandId => Routes.applicationCommand(applicationId, commandId),
+    }];
+
+  if (configuredGuilds.length) {
+    await rest.put(Routes.applicationCommands(applicationId), { body: [] });
+    console.log('Cleared duplicate global slash commands; using guild commands only');
+  }
 
   for (const scope of scopes) {
     const registered = await rest.get(scope.listRoute);
@@ -674,16 +1053,17 @@ async function registerCommands() {
       }
     }
     await rest.put(scope.listRoute, { body: commands });
-    console.log(`Registered slash commands in ${scope.name}; raffle commands removed`);
+    console.log(`Registered slash commands in ${scope.name}`);
   }
 }
 
 async function buildWeeklySummaryLegacy(brand, start, end) {
-  const rows = await storeFor(brand.sheet_id).fetchRange(
+  const allRows = await storeFor(brand.sheet_id).fetchRange(
     brand,
     start.valueOf(),
     end.valueOf()
   );
+  const rows = allRows.filter(row => !row.self_invoice);
 
   const byEmployee = new Map();
   for (const row of rows) {
@@ -712,11 +1092,13 @@ async function buildWeeklySummaryLegacy(brand, start, end) {
 }
 
 async function buildWeeklySummary(brand, start, end) {
-  const rows = await storeFor(brand.sheet_id).fetchRange(
+  const allRows = await storeFor(brand.sheet_id).fetchRange(
     brand,
     start.valueOf(),
     end.valueOf()
   );
+  const rows = allRows.filter(row => !row.self_invoice);
+  const excludedSelfInvoices = allRows.length - rows.length;
 
   const byEmployee = new Map();
   for (const row of rows) {
@@ -755,7 +1137,9 @@ async function buildWeeklySummary(brand, start, end) {
       { name: '📊 Average Sale', value: `**${fmt(averageSale)}**`, inline: true }
     )
     .setFooter({
-      text: `${sorted.length} employee${sorted.length === 1 ? '' : 's'} · New week starts Saturday`,
+      text: `${sorted.length} employee${sorted.length === 1 ? '' : 's'}` +
+        `${excludedSelfInvoices ? ` · ${excludedSelfInvoices} self-invoice${excludedSelfInvoices === 1 ? '' : 's'} excluded` : ''}` +
+        ' · New week starts Saturday',
     })
     .setTimestamp(new Date());
 
@@ -787,6 +1171,342 @@ async function postWeeklySummary(brand) {
   }
 }
 
+const messageProcessing = new Set();
+
+async function createAutomaticShopReimbursement(
+  brand,
+  message,
+  embed,
+  embedIndex,
+  { refreshDashboard = true } = {}
+) {
+  const purchase = parseShopPurchaseEmbed(embed);
+  if (!purchase) return { matched: false, added: false };
+
+  const timestamp = dayjs(message.createdTimestamp).tz(brand.timezone);
+  const reimbursementId = `shop-${message.id}-${embedIndex}`;
+  const unitPrice = purchase.amount / purchase.quantity;
+  const result = await storeFor(brand.sheet_id).appendReimbursement(brand, {
+    reimbursement_id: reimbursementId,
+    ts_iso: timestamp.toISOString(),
+    ts_epoch: timestamp.valueOf(),
+    brand: brand.name,
+    logged_by: 'Automatic shop log',
+    logged_by_id: '',
+    employee: purchase.player,
+    item: purchase.item,
+    quantity: purchase.quantity,
+    unit_price: unitPrice,
+    amount: purchase.amount,
+    notes: purchase.shopName ? `In-game shop: ${purchase.shopName}` : 'In-game shop purchase',
+    status: 'UNPAID',
+    paid_by: '',
+    paid_at: '',
+    source: 'SHOP_PURCHASE',
+    source_message_id: message.id,
+    shop_name: purchase.shopName,
+  });
+  if (result.deduped) return { matched: true, added: false };
+
+  if (refreshDashboard) await queuePublicReimbursementDashboard();
+  console.log(
+    `Automatic reimbursement logged: ${brand.name} | ${purchase.player} | ` +
+    `${purchase.quantity} x ${purchase.item} | ${fmt(purchase.amount)}`
+  );
+  return { matched: true, added: true };
+}
+
+async function processPaidMessage(message, source = 'live') {
+  const brand = BRANDS.find(item => String(item.log_channel_id) === message.channelId);
+  if (!brand || !message.embeds?.length || messageProcessing.has(message.id)) {
+    return { matched: false, added: false };
+  }
+
+  messageProcessing.add(message.id);
+  let matched = false;
+  let added = false;
+
+  try {
+    for (let embedIndex = 0; embedIndex < message.embeds.length; embedIndex += 1) {
+      const embed = message.embeds[embedIndex];
+      const shopPurchase = parseShopPurchaseEmbed(embed);
+      if (shopPurchase) {
+        matched = true;
+        // Do not create historical reimbursements during startup backfill. This
+        // keeps a restart from flooding the reimbursement channel with old buys.
+        if (source === 'live') {
+          const reimbursement = await createAutomaticShopReimbursement(
+            brand,
+            message,
+            embed,
+            embedIndex
+          );
+          if (reimbursement.added) added = true;
+        }
+        continue;
+      }
+      if (!hasPaidEmbed(embed)) continue;
+      matched = true;
+
+      const amount = Number(
+        String(extractField(embed, 'Amount') || '0').replace(/[^0-9.-]/g, '')
+      ) || 0;
+      const { paidBy, invoicedBy, isSelfInvoice } = detectSelfInvoice(embed);
+      const timestamp = dayjs(message.createdTimestamp).tz(brand.timezone);
+
+      const payoutResult = await storeFor(brand.sheet_id).append(brand, {
+        discord_message_id: message.id,
+        brand: brand.name,
+        ts_iso: timestamp.toISOString(),
+        ts_epoch: timestamp.valueOf(),
+        employee_display: invoicedBy,
+        employee_id: '',
+        job_name: extractField(embed, 'Job Name'),
+        amount,
+        memo: extractField(embed, 'Memo'),
+        invoiced_by: invoicedBy,
+        paid_by: paidBy,
+        self_invoice: isSelfInvoice ? 'YES' : 'NO',
+        invoice_status: 'PAID',
+      });
+      if (!payoutResult.deduped) added = true;
+      if (isSelfInvoice) {
+        console.warn(
+          `Self-invoice excluded: ${brand.name} | paid by ${paidBy || 'Unknown'} | ` +
+          `invoiced by ${invoicedBy || 'Unknown'} | message ${message.id}` +
+          `${source === 'backfill' ? ' [backfill]' : ''}`
+        );
+      }
+
+      const itemText = extractFieldLike(embed, [
+        'item', 'items', 'items purchased', 'item section',
+      ]);
+      const tickets = parseRaffleTickets(itemText, brand);
+      if (tickets > 0) {
+        const buyer = await raffleBuyerFromEmbed(embed, message);
+        const buyerKey = buyer.id || normalizedPersonKey(buyer.name);
+        const result = await storeFor(brand.sheet_id).appendRafflePurchase(brand, {
+          discord_message_id: message.id,
+          ts_iso: timestamp.toISOString(),
+          ts_epoch: timestamp.valueOf(),
+          brand: brand.name,
+          buyer_name: buyer.name,
+          buyer_id: buyer.id,
+          buyer_key: buyerKey,
+          item_text: itemText,
+          tickets,
+          source_channel_id: message.channelId,
+        });
+        if (!result.deduped) {
+          added = true;
+          console.log(
+            `Raffle purchase logged: ${brand.name} | ${buyer.name} | ` +
+            `${tickets} ticket(s)${source === 'backfill' ? ' [backfill]' : ''}`
+          );
+        }
+      }
+    }
+
+    return { matched, added };
+  } finally {
+    messageProcessing.delete(message.id);
+  }
+}
+
+function positiveInteger(value, fallback, maximum) {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, maximum);
+}
+
+const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+function isSheetsQuotaError(error) {
+  return error?.response?.status === 429 ||
+    error?.data?.error?.code === 429 ||
+    /quota exceeded|rate limit|\[429\]/i.test(String(error?.message || error));
+}
+
+async function processBackfillMessage(message) {
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await processPaidMessage(message, 'backfill');
+    } catch (error) {
+      if (!isSheetsQuotaError(error) || attempt === maxAttempts) throw error;
+      const delayMs = 65000 * attempt;
+      console.warn(
+        `Google Sheets quota reached; retrying message ${message.id} in ` +
+        `${Math.round(delayMs / 1000)} seconds (attempt ${attempt + 1}/${maxAttempts})`
+      );
+      await wait(delayMs);
+    }
+  }
+}
+
+async function processReceiptScanMessage(message) {
+  const brand = BRANDS.find(item => String(item.log_channel_id) === message.channelId);
+  if (!brand || !message.embeds?.length || messageProcessing.has(message.id)) {
+    return { matched: 0, added: 0 };
+  }
+
+  messageProcessing.add(message.id);
+  let matched = 0;
+  let added = 0;
+
+  try {
+    for (let embedIndex = 0; embedIndex < message.embeds.length; embedIndex += 1) {
+      const result = await createAutomaticShopReimbursement(
+        brand,
+        message,
+        message.embeds[embedIndex],
+        embedIndex,
+        { refreshDashboard: false }
+      );
+      if (!result.matched) continue;
+      matched += 1;
+      if (result.added) added += 1;
+    }
+    return { matched, added };
+  } finally {
+    messageProcessing.delete(message.id);
+  }
+}
+
+async function processReceiptScanMessageWithRetry(message) {
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await processReceiptScanMessage(message);
+    } catch (error) {
+      if (!isSheetsQuotaError(error) || attempt === maxAttempts) throw error;
+      const delayMs = 65000 * attempt;
+      console.warn(
+        `Google Sheets quota reached during receipt scan; retrying message ${message.id} in ` +
+        `${Math.round(delayMs / 1000)} seconds (attempt ${attempt + 1}/${maxAttempts})`
+      );
+      await wait(delayMs);
+    }
+  }
+}
+
+async function scanReceiptHistory(hours, maxMessages) {
+  const since = Date.now() - hours * 60 * 60 * 1000;
+  const summaries = [];
+
+  for (const brand of BRANDS) {
+    const summary = { brand: brand.name, scanned: 0, matched: 0, added: 0, error: '' };
+    try {
+      const channel = await client.channels.fetch(brand.log_channel_id);
+      if (!channel?.isTextBased() || !channel.messages?.fetch) {
+        throw new Error('Log channel does not support message history');
+      }
+
+      const found = [];
+      let before;
+      let reachedCutoff = false;
+      while (found.length < maxMessages && !reachedCutoff) {
+        const remaining = maxMessages - found.length;
+        const batchLimit = Math.min(100, remaining);
+        const batch = await channel.messages.fetch({
+          limit: batchLimit,
+          ...(before ? { before } : {}),
+        });
+        if (!batch.size) break;
+
+        const messages = [...batch.values()];
+        for (const message of messages) {
+          if (message.createdTimestamp >= since) found.push(message);
+          else reachedCutoff = true;
+        }
+
+        const oldest = messages.reduce((current, message) =>
+          !current || message.createdTimestamp < current.createdTimestamp ? message : current
+        , null);
+        before = oldest?.id;
+        if (!before || batch.size < batchLimit) break;
+      }
+
+      found.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+      summary.scanned = found.length;
+      for (const message of found) {
+        const result = await processReceiptScanMessageWithRetry(message);
+        summary.matched += result.matched;
+        summary.added += result.added;
+        if (result.matched) await wait(1200);
+      }
+    } catch (error) {
+      summary.error = error.message || String(error);
+      console.error(`Receipt scan failed for ${brand.name}:`, error);
+    }
+    summaries.push(summary);
+  }
+
+  if (summaries.some(summary => summary.added > 0)) {
+    await queuePublicReimbursementDashboard();
+  }
+  return summaries;
+}
+
+async function backfillMissedMessages() {
+  const hours = positiveInteger(process.env.BACKFILL_HOURS, 168, 720);
+  const maxMessages = positiveInteger(process.env.BACKFILL_MAX_MESSAGES, 2000, 10000);
+  const since = Date.now() - hours * 60 * 60 * 1000;
+
+  console.log(
+    `Backfill scanning the last ${hours} hour(s), up to ${maxMessages} messages per channel`
+  );
+
+  for (const brand of BRANDS) {
+    try {
+      const channel = await client.channels.fetch(brand.log_channel_id);
+      if (!channel?.isTextBased() || !channel.messages?.fetch) {
+        throw new Error('Log channel does not support message history');
+      }
+
+      const found = [];
+      let before;
+      let reachedCutoff = false;
+
+      while (found.length < maxMessages && !reachedCutoff) {
+        const remaining = maxMessages - found.length;
+        const batch = await channel.messages.fetch({
+          limit: Math.min(100, remaining),
+          ...(before ? { before } : {}),
+        });
+        if (!batch.size) break;
+
+        const messages = [...batch.values()];
+        for (const message of messages) {
+          if (message.createdTimestamp >= since) found.push(message);
+          else reachedCutoff = true;
+        }
+
+        const oldest = messages.reduce((current, message) =>
+          !current || message.createdTimestamp < current.createdTimestamp ? message : current
+        , null);
+        before = oldest?.id;
+        if (!before || batch.size < Math.min(100, remaining)) break;
+      }
+
+      found.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+      let recovered = 0;
+      for (const message of found) {
+        const result = await processBackfillMessage(message);
+        if (result.added) recovered += 1;
+        // Stay below Google Sheets' per-user read quota during large recoveries.
+        if (result.matched) await wait(1200);
+      }
+
+      console.log(
+        `Backfill complete: ${brand.name} scanned ${found.length}, recovered ${recovered}`
+      );
+    } catch (error) {
+      console.error(`Backfill failed for ${brand.name}:`, error.message);
+    }
+  }
+}
+
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   try {
@@ -807,6 +1527,18 @@ client.once('clientReady', async () => {
       brand.timezone
     );
   }
+
+  try {
+    await queuePublicReimbursementDashboard();
+    console.log('Shared reimbursement dashboard is ready');
+  } catch (error) {
+    console.warn(
+      'Could not refresh shared reimbursement dashboard:',
+      error?.stack || error?.message || error
+    );
+  }
+
+  await backfillMissedMessages();
 });
 
 const reimbursementDrafts = new Map();
@@ -832,6 +1564,176 @@ function reimbursementBrandComponents() {
     new ActionRowBuilder().addComponents(menu),
     new ActionRowBuilder().addComponents(cancel),
   ];
+}
+
+function selectableReimbursements(rows) {
+  // Keep malformed legacy rows in totals, but never offer an unsafe payment ID.
+  const seen = new Set();
+  return rows.filter(row => {
+    const id = row.reimbursement_id;
+    if (typeof id !== 'string' || !id.trim() || id.length > 100 || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).slice(0, 25);
+}
+
+async function buildReimbursementDashboard(notice = '') {
+  const embeds = [];
+  const components = [];
+  let grandTotal = 0;
+  let grandCount = 0;
+
+  for (let brandIndex = 0; brandIndex < BRANDS.length; brandIndex += 1) {
+    const brand = BRANDS[brandIndex];
+    const rows = (await storeFor(brand.sheet_id).unpaidReimbursements(brand))
+      .sort((a, b) => a.ts_epoch - b.ts_epoch);
+    const total = rows.reduce((sum, row) => sum + row.amount, 0);
+    const visible = selectableReimbursements(rows);
+    const displayed = rows.slice(0, 8);
+    grandTotal += total;
+    grandCount += rows.length;
+
+    const embed = new EmbedBuilder()
+      .setColor(brand.embed_color || 0x5865f2)
+      .setTitle(`🧾 ${brand.name}`)
+      .setDescription(
+        rows.length
+          ? `**${fmt(total)} owed across ${rows.length} reimbursement${rows.length === 1 ? '' : 's'}.**`
+          : '✅ No unpaid reimbursements.'
+      )
+      .setFooter({
+        text: rows.length > displayed.length
+          ? `Showing the oldest ${displayed.length} of ${rows.length}; up to 25 available below`
+          : `${rows.length} unpaid reimbursement${rows.length === 1 ? '' : 's'}`,
+      });
+
+    if (displayed.length) {
+      embed.addFields(displayed.map((row, index) => ({
+        name: `${index + 1}. ${row.employee} — ${fmt(row.amount)}`.slice(0, 256),
+        value: `${row.quantity === 1 ? '' : `${row.quantity} × `}${row.item}`.slice(0, 1024),
+        inline: false,
+      })));
+
+    }
+
+    if (visible.length) {
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`reimbursement-dashboard-paid:${brandIndex}`)
+        .setPlaceholder(`Mark ${brand.name} reimbursements paid…`.slice(0, 150))
+        .setMinValues(1)
+        .setMaxValues(visible.length)
+        .addOptions(visible.map(row => ({
+          label: `${row.employee} — ${fmt(row.amount)}`.slice(0, 100),
+          description: `${row.quantity === 1 ? '' : `${row.quantity} × `}${row.item}`.slice(0, 100),
+          value: row.reimbursement_id,
+        })));
+      components.push(new ActionRowBuilder().addComponents(menu));
+    }
+
+    embeds.push(embed);
+  }
+
+  components.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('reimbursement-dashboard-refresh')
+        .setLabel('Refresh')
+        .setEmoji('🔄')
+        .setStyle(ButtonStyle.Secondary)
+    )
+  );
+
+  return {
+    content:
+      `${notice ? `${notice}\n\n` : ''}` +
+      `### 🧾 All Reimbursements Owed\n` +
+      `**Grand total: ${fmt(grandTotal)}** • ${grandCount} unpaid`,
+    embeds: embeds.slice(0, 10),
+    components: components.slice(0, 5),
+  };
+}
+
+let publicReimbursementDashboardMessageId = '';
+let publicReimbursementDashboardRefresh = null;
+
+async function buildPublicReimbursementDashboard() {
+  const sections = [];
+  let grandTotal = 0;
+  let grandCount = 0;
+
+  for (const brand of BRANDS) {
+    const rows = (await storeFor(brand.sheet_id).unpaidReimbursements(brand))
+      .sort((a, b) => a.ts_epoch - b.ts_epoch);
+    const total = rows.reduce((sum, row) => sum + row.amount, 0);
+    grandTotal += total;
+    grandCount += rows.length;
+    const entries = rows.slice(0, 5).map(row =>
+      `• ${row.employee} — ${fmt(row.amount)} — ` +
+      `${row.quantity === 1 ? '' : `${row.quantity} × `}${row.item}`
+    );
+    sections.push(
+      `**${brand.name}: ${fmt(total)} (${rows.length})**` +
+      (entries.length ? `\n${entries.join('\n')}` : '\n✅ Nothing owed') +
+      (rows.length > entries.length ? `\n_+${rows.length - entries.length} more in the payout UI_` : '')
+    );
+  }
+
+  const content =
+    `### 🧾 All Reimbursements Owed\n` +
+    `**Grand total: ${fmt(grandTotal)} • ${grandCount} unpaid**\n\n` +
+    sections.join('\n\n') +
+    `\n\n_This message updates automatically. Use the payout controls or ` +
+    '`/reimbursements` to mark entries paid._';
+  return { content: content.slice(0, 2000), embeds: [], components: [] };
+}
+
+async function refreshPublicReimbursementDashboard() {
+  const channelId = BRANDS
+    .map(brand => brand.reimbursements_channel_id || brand.reimbursement_channel_id)
+    .find(Boolean);
+  if (!channelId) throw new Error('No reimbursements channel is configured');
+
+  const channel = await client.channels.fetch(channelId);
+  if (!channel?.isTextBased() || !channel.messages?.fetch) {
+    throw new Error('Reimbursements channel is not text based');
+  }
+
+  let dashboardMessage = null;
+  if (publicReimbursementDashboardMessageId) {
+    dashboardMessage = await channel.messages
+      .fetch(publicReimbursementDashboardMessageId)
+      .catch(() => null);
+  }
+  if (!dashboardMessage) {
+    const recent = await channel.messages.fetch({ limit: 100 });
+    dashboardMessage = recent.find(message =>
+      message.author?.id === client.user.id &&
+      message.content.includes('### 🧾 All Reimbursements Owed')
+    ) || null;
+  }
+
+  const payload = await buildPublicReimbursementDashboard();
+  if (dashboardMessage) {
+    await dashboardMessage.edit(payload);
+  } else {
+    dashboardMessage = await channel.send(payload);
+  }
+  publicReimbursementDashboardMessageId = dashboardMessage.id;
+  return dashboardMessage;
+}
+
+function queuePublicReimbursementDashboard() {
+  if (!publicReimbursementDashboardRefresh) {
+    publicReimbursementDashboardRefresh = (async () => {
+      await wait(1500);
+      try {
+        return await refreshPublicReimbursementDashboard();
+      } finally {
+        publicReimbursementDashboardRefresh = null;
+      }
+    })();
+  }
+  return publicReimbursementDashboardRefresh;
 }
 
 function reimbursementQuickModal(brand, brandIndex, interaction) {
@@ -950,6 +1852,59 @@ async function reimbursementItemPanel(brand, brandIndex, draft = {}) {
 
 // Intentionally one interactionCreate handler so every command is acknowledged once.
 client.on('interactionCreate', async interaction => {
+  if (
+    (interaction.isStringSelectMenu() &&
+      interaction.customId.startsWith('reimbursement-dashboard-paid:')) ||
+    (interaction.isButton() && interaction.customId === 'reimbursement-dashboard-refresh')
+  ) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({
+        content: 'You need the Manage Server permission to manage reimbursements.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferUpdate();
+    try {
+      let notice = '🔄 Dashboard refreshed.';
+      if (interaction.isStringSelectMenu()) {
+        const brandIndex = Number(interaction.customId.split(':')[1]);
+        const brand = BRANDS[brandIndex];
+        if (!brand) throw new Error('That business is no longer configured');
+
+        const selectedIds = new Set(interaction.values.map(String));
+        const sheet = await storeFor(brand.sheet_id).reimbursementSheet(brand);
+        const rows = await sheet.getRows();
+        let changed = 0;
+        for (const row of rows) {
+          const reimbursementId = String(row.get('reimbursement_id') || '');
+          if (!selectedIds.has(reimbursementId)) continue;
+          if (String(row.get('status') || '').toUpperCase() !== 'PAID') {
+            row.set('status', 'PAID');
+            row.set('paid_by', interaction.user.id);
+            row.set('paid_at', new Date().toISOString());
+            await row.save();
+            changed += 1;
+          }
+        }
+        notice = `✅ Marked ${changed} ${brand.name} reimbursement${changed === 1 ? '' : 's'} paid.`;
+        if (interaction.message.id !== publicReimbursementDashboardMessageId) {
+          await queuePublicReimbursementDashboard();
+        }
+      }
+
+      await interaction.editReply(await buildReimbursementDashboard(notice));
+    } catch (error) {
+      console.error('Reimbursement dashboard error:', error);
+      await interaction.followUp({
+        content: `Could not update the reimbursement dashboard: ${error.message}`,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    return;
+  }
+
   if (interaction.isStringSelectMenu() && interaction.customId === 'reimbursement-brand') {
     const brandIndex = Number(interaction.values[0]);
     const brand = BRANDS[brandIndex];
@@ -1011,6 +1966,7 @@ client.on('interactionCreate', async interaction => {
         row.set('paid_at', new Date().toISOString());
         await row.save();
       }
+      await queuePublicReimbursementDashboard();
 
       const currentEmbed = interaction.message.embeds[0];
       if (!currentEmbed) throw new Error('The reimbursement embed is missing');
@@ -1104,40 +2060,13 @@ client.on('interactionCreate', async interaction => {
         paid_at: '',
       });
 
-      const channelId = brand.reimbursements_channel_id || brand.reimbursement_channel_id;
-      if (!channelId) throw new Error('No reimbursements_channel_id is configured');
-      const channel = await client.channels.fetch(channelId);
-      if (!channel?.isTextBased()) throw new Error('Reimbursements channel is not text based');
-
-      const embed = new EmbedBuilder()
-        .setColor(brand.embed_color || 0x5865f2)
-        .setTitle(`🧾 ${brand.name} Reimbursement`)
-        .addFields(
-          { name: 'Employee', value: employee, inline: true },
-          { name: 'Total', value: `**${fmt(amount)}**`, inline: true },
-          { name: 'Item', value: item.name, inline: true },
-          { name: 'Quantity', value: String(draft.quantity), inline: true },
-          { name: 'Unit Price', value: fmt(item.price), inline: true },
-          { name: 'Logged By', value: `<@${interaction.user.id}>`, inline: true },
-          { name: 'Status', value: '🔴 **UNPAID**', inline: false }
-        )
-        .setFooter({ text: `Employee reimbursement • ${brand.timezone}` })
-        .setTimestamp(timestamp.toDate());
-      const paidButton = new ButtonBuilder()
-        .setCustomId(`reimbursement-mark-paid:${brandIndex}:${reimbursementId}`)
-        .setLabel('Mark Paid')
-        .setEmoji('✅')
-        .setStyle(ButtonStyle.Success);
-      await channel.send({
-        embeds: [embed],
-        components: [new ActionRowBuilder().addComponents(paidButton)],
-      });
+      await queuePublicReimbursementDashboard();
 
       reimbursementDrafts.delete(key);
       await interaction.editReply({
         content:
           `Saved **${draft.quantity} x ${item.name}** for **${fmt(amount)}** ` +
-          'and posted it publicly.',
+          'and updated the shared reimbursement dashboard.',
         components: [],
       });
     } catch (error) {
@@ -1204,52 +2133,13 @@ client.on('interactionCreate', async interaction => {
         notes, status: 'UNPAID', paid_by: '', paid_at: '',
       });
 
-      const reimbursementChannelId =
-        brand.reimbursements_channel_id || brand.reimbursement_channel_id;
-      let channelMessage = '';
-
+      let channelMessage = '\nUpdated the shared reimbursement dashboard.';
       try {
-        if (!reimbursementChannelId) {
-          throw new Error('No reimbursements_channel_id is configured for this business');
-        }
-        const reimbursementChannel = await client.channels.fetch(reimbursementChannelId);
-        if (!reimbursementChannel?.isTextBased()) {
-          throw new Error('The configured reimbursements channel is not a text channel');
-        }
-
-        const logEmbed = new EmbedBuilder()
-          .setColor(brand.embed_color || 0x5865f2)
-          .setTitle(`🧾 ${brand.name} Reimbursement`)
-          .addFields(
-            { name: 'Employee', value: employee || 'Unknown', inline: true },
-            { name: 'Total', value: `**${fmt(amount)}**`, inline: true },
-            { name: 'Item', value: item.name, inline: true },
-            { name: 'Quantity', value: String(quantity), inline: true },
-            { name: 'Unit Price', value: fmt(item.price), inline: true },
-            { name: 'Logged By', value: `<@${interaction.user.id}>`, inline: true },
-            { name: 'Status', value: '🔴 **UNPAID**', inline: false }
-          )
-          .setFooter({ text: `Employee reimbursement • ${brand.timezone}` })
-          .setTimestamp(timestamp.toDate());
-
-        if (notes) {
-          logEmbed.addFields({ name: 'Notes', value: notes.slice(0, 1024) });
-        }
-
-        const paidButton = new ButtonBuilder()
-          .setCustomId(`reimbursement-mark-paid:${brandIndexText}:${reimbursementId}`)
-          .setLabel('Mark Paid')
-          .setEmoji('✅')
-          .setStyle(ButtonStyle.Success);
-        await reimbursementChannel.send({
-          embeds: [logEmbed],
-          components: [new ActionRowBuilder().addComponents(paidButton)],
-        });
-        channelMessage = '\nPosted in the reimbursements channel.';
+        await queuePublicReimbursementDashboard();
       } catch (channelError) {
-        console.error('Reimbursement channel log error:', channelError);
+        console.error('Reimbursement dashboard update error:', channelError);
         channelMessage =
-          `\n⚠️ Spreadsheet saved, but the channel post failed: ${channelError.message}`;
+          `\n⚠️ Spreadsheet saved, but the dashboard update failed: ${channelError.message}`;
       }
 
       await interaction.editReply(
@@ -1358,6 +2248,62 @@ client.on('interactionCreate', async interaction => {
 
   if (
     interaction.isStringSelectMenu() &&
+    interaction.customId.startsWith('payout-reimbursement-paid:')
+  ) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      await interaction.reply({
+        content: 'You need the Manage Server permission to mark reimbursements paid.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const [, brandIndexText, weekStartText] = interaction.customId.split(':');
+    const brandIndex = Number(brandIndexText);
+    const brand = BRANDS[brandIndex];
+    if (!brand) return;
+    await interaction.deferUpdate();
+
+    try {
+      const selectedIds = new Set(interaction.values.map(String));
+      const sheet = await storeFor(brand.sheet_id).reimbursementSheet(brand);
+      const rows = await sheet.getRows();
+      for (const row of rows) {
+        const reimbursementId = String(row.get('reimbursement_id') || '');
+        if (!selectedIds.has(reimbursementId)) continue;
+        if (String(row.get('status') || '').toUpperCase() === 'PAID') continue;
+        row.set('status', 'PAID');
+        row.set('paid_by', interaction.user.id);
+        row.set('paid_at', new Date().toISOString());
+        await row.save();
+      }
+      await queuePublicReimbursementDashboard();
+
+      const { start, end } = weekWindow(
+        dayjs.tz(weekStartText, brand.timezone),
+        brand.week_start,
+        brand.timezone
+      );
+      const embeds = await buildFinalPayEmbeds(brand, start, end);
+      const components = await buildPaidChecklistComponents(
+        brand,
+        brandIndex,
+        start,
+        end
+      );
+      await interaction.editReply({ embeds: embeds.slice(0, 10), components });
+    } catch (error) {
+      console.error('Payout reimbursement update error:', error);
+      await interaction.followUp({
+        content: `Could not mark the reimbursement paid: ${error.message}`,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    return;
+  }
+
+  if (
+    interaction.isStringSelectMenu() &&
     (interaction.customId.startsWith('payroll-set-paid:') ||
       interaction.customId.startsWith('payroll-set-unpaid:'))
   ) {
@@ -1410,9 +2356,9 @@ client.on('interactionCreate', async interaction => {
   }
 
   if (!interaction.isChatInputCommand()) return;
-  if (!['payout', 'finalpay', 'lastweek', 'payout-employee', 'reimbursement', 'reimbursement-items'].includes(interaction.commandName)) return;
+  if (!['payout', 'finalpay', 'lastweek', 'payout-employee', 'reimbursement', 'reimbursement-items', 'reimbursements', 'scan-receipts'].includes(interaction.commandName)) return;
 
-  const ephemeral = ['payout-employee', 'reimbursement', 'reimbursement-items']
+  const ephemeral = ['payout-employee', 'reimbursement', 'reimbursement-items', 'reimbursements', 'scan-receipts']
     .includes(interaction.commandName);
   try {
     await interaction.deferReply({ flags: ephemeral ? MessageFlags.Ephemeral : undefined });
@@ -1445,6 +2391,45 @@ client.on('interactionCreate', async interaction => {
         content: '**Reimbursement Item Manager**\nChoose the business.',
         components: [new ActionRowBuilder().addComponents(brandMenu)],
       });
+      return;
+    }
+
+    if (interaction.commandName === 'reimbursements') {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+        await interaction.editReply('You need the Manage Server permission.');
+        return;
+      }
+      await interaction.editReply(await buildReimbursementDashboard());
+      return;
+    }
+
+    if (interaction.commandName === 'scan-receipts') {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+        await interaction.editReply('You need the Manage Server permission.');
+        return;
+      }
+
+      const hours = positiveInteger(interaction.options.getInteger('hours'), 168, 720);
+      const maxMessages = positiveInteger(
+        interaction.options.getInteger('max-messages'),
+        2000,
+        10000
+      );
+      await interaction.editReply(
+        `Scanning the last ${hours} hour(s), up to ${maxMessages} messages per business…`
+      );
+      const summaries = await scanReceiptHistory(hours, maxMessages);
+      const totalAdded = summaries.reduce((sum, summary) => sum + summary.added, 0);
+      const lines = summaries.map(summary => {
+        if (summary.error) return `❌ **${summary.brand}:** ${summary.error}`;
+        const skipped = summary.matched - summary.added;
+        return `• **${summary.brand}:** ${summary.scanned} scanned, ` +
+          `${summary.added} added, ${skipped} already recorded`;
+      });
+      await interaction.editReply(
+        `### 🧾 Receipt Scan Complete\n${lines.join('\n')}\n\n` +
+        `**New reimbursements owed:** ${totalAdded}`
+      );
       return;
     }
 
@@ -1559,7 +2544,8 @@ client.on('interactionCreate', async interaction => {
       end.valueOf()
     );
     const employeeRows = rows.filter(
-      row => String(row.invoiced_by || '').trim().toLowerCase() === requestedEmployee.toLowerCase()
+      row => !row.self_invoice &&
+        String(row.invoiced_by || '').trim().toLowerCase() === requestedEmployee.toLowerCase()
     );
     const total = employeeRows.reduce((sum, row) => sum + row.amount, 0);
     const lines = employeeRows
@@ -1591,60 +2577,7 @@ client.on('interactionCreate', async interaction => {
 
 client.on('messageCreate', async message => {
   try {
-    const brand = BRANDS.find(item => String(item.log_channel_id) === message.channelId);
-    if (!brand || !message.embeds?.length) return;
-
-    for (const embed of message.embeds) {
-      if (!hasPaidEmbed(embed)) continue;
-
-      const amount = Number(
-        String(extractField(embed, 'Amount') || '0').replace(/[^0-9.-]/g, '')
-      ) || 0;
-      const invoicedBy =
-        extractField(embed, 'Invoiced By Name') || extractField(embed, 'Invoiced By');
-      const timestamp = dayjs(message.createdTimestamp).tz(brand.timezone);
-
-      await storeFor(brand.sheet_id).append(brand, {
-        discord_message_id: message.id,
-        brand: brand.name,
-        ts_iso: timestamp.toISOString(),
-        ts_epoch: timestamp.valueOf(),
-        employee_display: invoicedBy,
-        employee_id: '',
-        job_name: extractField(embed, 'Job Name'),
-        amount,
-        memo: extractField(embed, 'Memo'),
-        invoiced_by: invoicedBy,
-        invoice_status: 'PAID',
-      });
-
-      const itemText = extractFieldLike(embed, [
-        'item', 'items', 'items purchased', 'item section',
-      ]);
-      const tickets = parseRaffleTickets(itemText, brand);
-      if (tickets > 0) {
-        const buyer = await raffleBuyerFromEmbed(embed, message);
-        const buyerKey = buyer.id || normalizedPersonKey(buyer.name);
-        const result = await storeFor(brand.sheet_id).appendRafflePurchase(brand, {
-          discord_message_id: message.id,
-          ts_iso: timestamp.toISOString(),
-          ts_epoch: timestamp.valueOf(),
-          brand: brand.name,
-          buyer_name: buyer.name,
-          buyer_id: buyer.id,
-          buyer_key: buyerKey,
-          item_text: itemText,
-          tickets,
-          source_channel_id: message.channelId,
-        });
-        if (!result.deduped) {
-          console.log(
-            `Raffle purchase logged: ${brand.name} | ${buyer.name} | ${tickets} ticket(s)`
-          );
-        }
-      }
-
-    }
+    await processPaidMessage(message);
   } catch (error) {
     console.error('Message handler error:', error);
   }
